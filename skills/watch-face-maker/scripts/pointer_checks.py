@@ -38,6 +38,8 @@ def validate_pointers(snapshot, pointers, canvas=(480, 480), safe_margin=4, shap
             errors.append(f"指针母件引用错误：{n['id']}")
         w, h = master.get('width', 0), master.get('height', 0)
         px, py = p['pivot']
+        if any(not math.isfinite(v) or abs(v-round(v)) > .001 for v in (*p['pivot'], *p['center'])):
+            errors.append(f"指针局部轴心或屏幕轴心不是整数像素：{master['id']}")
         if not (w > 0 and h > 0 and w % 2 == h % 2 == 0 and 0 <= px <= w and 0 <= py <= h):
             errors.append(f"指针尺寸或局部轴心无效：{master['id']}")
         transform = n.get('relative_transform')
