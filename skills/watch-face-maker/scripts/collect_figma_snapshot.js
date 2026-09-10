@@ -35,7 +35,10 @@ async function collectSnapshot(config) {
     "clipsContent", "exportSettings", "effects", "characters", "fontName", "fontSize", "strokeWeight", "strokeAlign",
     "lineHeight", "letterSpacing", "textAlignHorizontal", "textAlignVertical", "vectorPaths", "vectorNetwork",
     "textStyleId", "fillStyleId", "componentProperties", "overrides", "layoutMode", "itemSpacing", "constraints",
-    "cornerRadius", "boundVariables", "paddingLeft", "paddingRight", "paddingTop", "paddingBottom"];
+    "cornerRadius", "boundVariables", "paddingLeft", "paddingRight", "paddingTop", "paddingBottom",
+    "blendMode", "isMask", "maskType", "booleanOperation", "strokeCap", "strokeJoin", "dashPattern",
+    "topLeftRadius", "topRightRadius", "bottomLeftRadius", "bottomRightRadius", "cornerSmoothing",
+    "strokeTopWeight", "strokeBottomWeight", "strokeLeftWeight", "strokeRightWeight", "arcData", "resolvedVariableModes"];
   const nodeContent = (node, references) => JSON.stringify(canonical([node.id, node.parent?.id, node.name, node.type,
     ...fields.map((key) => key in node ? node[key] : null), references[node.id] || null,
     node.type === "TEXT" ? node.getStyledTextSegments(["fontName", "fontSize", "fills", "textStyleId", "lineHeight", "letterSpacing", "textCase", "textDecoration"]) : null]));
@@ -171,7 +174,7 @@ async function collectSnapshot(config) {
   return {
     schema_version: 2,
     evidence_level: profile === "preflight" ? "preflight" : "validation",
-    stability: {before: signature, after: afterSignature, status: "pass", algorithm: "fnv1a32-content-v2"},
+    stability: {before: signature, after: afterSignature, status: "pass", algorithm: "fnv1a32-content-v3"},
     captured_at: new Date().toISOString(),
     capture_signature: signature,
     config: plain(config),

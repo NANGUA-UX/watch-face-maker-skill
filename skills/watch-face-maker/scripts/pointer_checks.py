@@ -68,10 +68,44 @@ def validate_pointers(snapshot, pointers, canvas=(480, 480), safe_margin=4):
 
 
 def validate_aod_pointers(snapshot, pointers):
-    """核对实际母件尺寸/描边，以及亮屏与熄屏的同轴同角关系。"""
+    """核对母件与实际AOD实例描边，以及亮屏与熄屏的同轴同角关系。"""
     nodes = {n['id']: n for n in snapshot['nodes']}
     roles = {p['role']: p for p in pointers}
     errors, unknown = [], []
+    def visible(node, stop=None):
+        seen = set()
+        while node:
+            if node['id'] in seen or node.get('visible') is False or node.get('opacity', 1) <= 0:
+                return False
+            seen.add(node['id'])
+            if node['id'] == stop:
+                break
+            node = nodes.get(node.get('parent_id'))
+        return True
+
+    def check_ink(root, displayed=False):
+        descendants = {root['id']}
+        while True:
+            expanded = descendants | {n['id'] for n in nodes.values() if n.get('parent_id') in descendants}
+            if expanded == descendants:
+                break
+            descendants = expanded
+        all_vectors = [nodes[i] for i in descendants if nodes[i].get('type') == 'VECTOR']
+        vectors = [n for n in all_vectors if visible(n, None if displayed else root['id'])]
+        if not all_vectors:
+            unknown.append(f'AOD指针缺少原始矢量：{root["id"]}')
+        elif not vectors:
+            errors.append(f'AOD指针没有可见描边：{root["id"]}')
+        for n in vectors:
+            if 'fills' not in n or 'strokes' not in n:
+                unknown.append(f'AOD指针缺少原始填充/描边：{n["id"]}')
+                continue
+            fills = [p for p in n['fills'] if p.get('visible', True) and p.get('opacity', 1) > 0]
+            strokes = [p for p in n['strokes'] if p.get('visible', True) and p.get('opacity', 1) > 0]
+            weight = n.get('stroke_weight', n.get('strokeWeight', 0))
+            if fills or len(strokes) != 1 or weight <= 0 or strokes[0].get('type') != 'SOLID' or strokes[0].get('opacity', 1) != 1 or any(round(strokes[0].get('color', {}).get(k, -1)*255) != 179 for k in 'rgb'):
+                errors.append(f'AOD指针不是#B3B3B3无填充描边：{n["id"]}')
+
     for role in ('Hour', 'Minute'):
         active, dark = roles.get(role), roles.get(role+'Dark')
         if not active or not dark:
@@ -83,19 +117,14 @@ def validate_aod_pointers(snapshot, pointers):
             continue
         if any(active[k] != dark[k] for k in ('pivot', 'center', 'angle')) or any(a[k] != d[k] for k in ('width', 'height')):
             errors.append(f'AOD指针未同位同尺寸：{role}')
-        descendants = {d['id']}
-        while True:
-            expanded = descendants | {n['id'] for n in nodes.values() if n.get('parent_id') in descendants}
-            if expanded == descendants:
-                break
-            descendants = expanded
-        vectors = [nodes[i] for i in descendants if nodes[i].get('type') == 'VECTOR' and nodes[i].get('visible', True)]
-        if not vectors:
-            unknown.append(f'AOD指针缺少原始矢量：{role}')
-        for n in vectors:
-            fills = [p for p in n.get('fills', []) if p.get('visible', True) and p.get('opacity', 1) > 0]
-            strokes = [p for p in n.get('strokes', []) if p.get('visible', True) and p.get('opacity', 1) > 0]
-            weight = n.get('stroke_weight', n.get('strokeWeight', 0))
-            if fills or len(strokes) != 1 or weight <= 0 or strokes[0].get('type') != 'SOLID' or strokes[0].get('opacity', 1) != 1 or any(round(strokes[0].get('color', {}).get(k, -1)*255) != 179 for k in 'rgb'):
-                errors.append(f'AOD指针不是#B3B3B3无填充描边：{n["id"]}')
+        check_ink(d)
+        instance = nodes.get(dark['instance_id'])
+        if not instance or instance.get('main_component_id') != d['id']:
+            errors.append(f'AOD实例缺失或母件引用错误：{dark["instance_id"]}')
+        elif not visible(instance):
+            errors.append(f'AOD实例或祖先不可见：{instance["id"]}')
+        elif snapshot.get('config', {}).get('skip_instance_children') or snapshot.get('traversal', {}).get('skip_instance_children'):
+            unknown.append(f'AOD实例内部未采集：{instance["id"]}')
+        else:
+            check_ink(instance, displayed=True)
     return errors, unknown

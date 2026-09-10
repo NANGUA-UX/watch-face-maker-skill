@@ -394,7 +394,7 @@ def has_translation_only_transform(node: dict) -> bool:
 def effectively_visible(node: dict, nodes_by_id: dict, stop_id: str) -> bool:
     current = node
     while current:
-        if current.get("visible") is False:
+        if current.get("visible") is False or current.get("opacity", 1) == 0:
             return False
         if current.get("id") == stop_id:
             return True
@@ -661,6 +661,7 @@ def validate_snapshot(snapshot: dict) -> list[dict]:
                 skew_x, scale_y, offset_y = transform[1]
                 if (
                     abs(offset_x - expected_x) > .001 or abs(offset_y - expected_y) > .001
+                    or scale_x <= 0 or scale_y <= 0
                     or abs(skew_x) > .001 or abs(skew_y) > .001 or abs(scale_x - scale_y) > .001
                     or abs(instance.get("width", math.inf) - expected_width) > .001
                     or abs(instance.get("height", math.inf) - expected_height) > .001
@@ -696,7 +697,7 @@ def validate_snapshot(snapshot: dict) -> list[dict]:
             for node_id in container_ids - {config[container_field]}:
                 node = nodes_by_id[node_id]
                 has_child = any(child.get("parent_id") == node_id for child in nodes)
-                if has_child or node.get("visible") is False or node.get("type") == "INSTANCE":
+                if has_child or node.get("type") == "INSTANCE" or not effectively_visible(node, nodes_by_id, config[container_field]):
                     continue
                 ancestor_id = node.get("parent_id")
                 carried = False
@@ -955,7 +956,7 @@ def validate_snapshot(snapshot: dict) -> list[dict]:
     if snapshot.get("face_type") == "analog":
         checks = [c for c in checks if c['id'] not in {"snapshot.time_roles", "snapshot.aod_style"}]
         errors, unknown = validate_aod_pointers(snapshot, snapshot.get("pointers", []))
-        checks.append(check_item("snapshot.analog_aod", "fail" if errors else ("unverified" if unknown else "pass"), "亮屏与AOD时分针同轴、同角、同尺寸；AOD母件为#B3B3B3描边", errors+unknown))
+        checks.append(check_item("snapshot.analog_aod", "fail" if errors else ("unverified" if unknown else "pass"), "亮屏与AOD时分针同轴、同角、同尺寸；AOD母件及可见展示实例为#B3B3B3描边", errors+unknown))
     return checks
 
 
