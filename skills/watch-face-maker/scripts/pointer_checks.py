@@ -1,5 +1,6 @@
 """指针切图的轴心、旋转与圆屏扫过边界检查。角度从12点顺时针计。"""
 import math
+from screen_geometry import contains
 
 
 def time_angles(hour, minute, second):
@@ -23,7 +24,7 @@ def transform_at(pivot, center, angle):
     return [[c, -s, cx-c*px+s*py], [s, c, cy-s*px-c*py]]
 
 
-def validate_pointers(snapshot, pointers, canvas=(480, 480), safe_margin=4):
+def validate_pointers(snapshot, pointers, canvas=(480, 480), safe_margin=4, shape="circle", corner_radius=0):
     nodes = {n['id']: n for n in snapshot['nodes']}
     errors, measured = [], []
     order = {n['id']: i for i, n in enumerate(snapshot['nodes'])}
@@ -54,10 +55,10 @@ def validate_pointers(snapshot, pointers, canvas=(480, 480), safe_margin=4):
         if bounds:
             x, y, bw, bh = bounds
             sweep = max(math.hypot(x+dx-px, y+dy-py) for dx in (0, bw) for dy in (0, bh))
-            if math.dist(p['center'], [canvas[0]/2, canvas[1]/2]) + sweep > min(canvas)/2-safe_margin:
-                errors.append(f"指针扫过圆屏安全区：{n['id']}")
+            if not contains(*p["center"], *canvas, shape, corner_radius, safe_margin+sweep):
+                errors.append(f"指针扫过屏幕安全区：{n['id']}")
         measured.append({'id': n['id'], 'pivot_error': delta, 'sweep_radius': sweep,
-                         'sweep_status': 'pass' if bounds else 'unverified'})
+                         'sweep_status': ('fail' if bounds and not contains(*p['center'], *canvas, shape, corner_radius, safe_margin+sweep) else 'pass') if bounds else 'unverified'})
         if p['role'] in {'Hour', 'Minute', 'Second', 'Hub'}:
             layers.setdefault(n.get('parent_id'), {})[p['role']] = order[n['id']]
     for parent, values in layers.items():

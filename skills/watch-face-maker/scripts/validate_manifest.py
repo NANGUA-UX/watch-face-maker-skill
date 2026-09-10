@@ -14,6 +14,7 @@ from pathlib import Path
 from naming import validate_names
 from run_evidence import stable_snapshot, validate_run
 from pointer_checks import validate_pointers, validate_aod_pointers
+from screen_geometry import screen_spec, contains, fit_preview
 
 
 STANDARD_STATE_COUNTS = {"weather": 48, "battery": 11, "bluetooth": 2}
@@ -115,13 +116,13 @@ def validate_manifest(data: dict) -> tuple[list[str], dict]:
     if not isinstance(canvas, dict):
         errors.append("canvas 必须是对象")
         canvas = {}
-    if (
-        not is_integer(canvas.get("width"))
-        or not is_integer(canvas.get("height"))
-        or canvas.get("width") != 480
-        or canvas.get("height") != 480
-    ):
-        errors.append("当前规范要求画布尺寸为 480×480")
+    try:
+        if "width" not in canvas or "height" not in canvas:
+            raise ValueError("canvas 必须提供宽高")
+        spec = screen_spec(canvas)
+    except ValueError as exc:
+        errors.append(str(exc))
+        spec = screen_spec()
     safe_margin = canvas.get("safe_margin", 0)
     if not is_finite_number(safe_margin) or safe_margin < 4:
         errors.append("安全边距不能小于 4 px")
@@ -159,8 +160,8 @@ def validate_manifest(data: dict) -> tuple[list[str], dict]:
         or exports.get("asset_scale") != 1
     ):
         errors.append("exports.asset_scale 必须为 1×")
-    if exports.get("preview") != [256, 256]:
-        errors.append("缩略图尺寸必须为 256×256")
+    if exports.get("preview") != spec["preview"]:
+        errors.append(f"缩略图尺寸必须为 {spec['preview'][0]}×{spec['preview'][1]}")
 
     states = data.get("states", {})
     if not isinstance(states, dict) or not states:
@@ -457,6 +458,111 @@ def validate_digit_geometry(nodes_by_id: dict, all_text: bool = False) -> dict:
     return check_item("snapshot.text_geometry" if all_text else "snapshot.digit_geometry", status, explanation, sorted(set(failures + unknown)))
 
 
+def validate_target_binding(manifest, snapshot):
+    pagination = snapshot.get('pagination', {})
+    if pagination.get('complete') is not True or pagination.get('total_nodes') != pagination.get('collected_nodes') or pagination.get('collected_nodes') != len(snapshot.get('nodes', [])):
+        return [check_item('snapshot.target_binding', 'unverified', '快照不完整，不能绑定目标规格')]
+    try:
+        expected = screen_spec(manifest.get('canvas'))
+        actual = screen_spec(snapshot.get('config', {}).get('canvas'))
+        ok = expected == actual and snapshot.get('config', {}).get('preview', actual['preview']) == manifest.get('exports', {}).get('preview')
+        return [check_item('snapshot.target_binding', 'pass' if ok else 'fail', '目标清单、快照屏形与缩略图规范绑定核对')]
+    except ValueError as exc:
+        return [check_item('snapshot.target_binding', 'fail', str(exc))]
+
+
+def validate_target_geometry(snapshot, spec):
+    config = snapshot['config']
+    nodes = {n['id']: n for n in snapshot['nodes']}
+    failures, unknown = [], []
+    for key in ('main_id', 'active_id', 'aod_id', 'preview_id'):
+        n = nodes.get(config.get(key), {})
+        expected = spec['preview'] if key == 'preview_id' else [spec['width'], spec['height']]
+        if [n.get('width'), n.get('height')] != expected:
+            failures.append(str(config.get(key)))
+    active = nodes[config['active_id']]
+    if 'cornerRadius' not in active:
+        unknown.append(active['id'])
+    elif active['cornerRadius'] != spec['corner_radius']:
+        failures.append(active['id'])
+    if config.get('preview', spec['preview']) != spec['preview']:
+        failures.append('config.preview')
+    if nodes[config['asset_board_id']].get('type') != 'SECTION':
+        failures.append(config['asset_board_id'])
+    result = [check_item('snapshot.target_geometry', 'fail' if failures else ('unverified' if unknown else 'pass'), '核对目标画布、Active圆角、缩略图和切图分区', failures+unknown)]
+    bg = nodes.get(config.get('background_id'))
+    bg_ok = bg and [bg.get('width'), bg.get('height')] == [spec['width'], spec['height']]
+    result.append(check_item('snapshot.background_fit', ('pass' if bg_ok else 'fail') if bg else 'unverified', '背景母件须匹配目标尺寸；铺满与构图仍须视觉复核', [config.get('background_id')] if bg else []))
+    # 排除组件库内部几何；只核对Active/AOD中直接组装的切图实例及布局祖先。
+    failures, unknown = [], []
+    for root in (config['active_id'], config['aod_id']):
+        ids = descendants(nodes, root)
+        for n in (nodes[k] for k in ids if nodes[k].get('type') == 'INSTANCE'):
+            ancestors = descendants_up(n, nodes, root)
+            if any(nodes[k].get('type') == 'INSTANCE' for k in ancestors) or not effectively_visible(n, nodes, root):
+                continue
+            master = nodes.get(n.get('main_component_id'))
+            if not master or any(abs(n.get(k, -1)-master.get(k, -2)) > .001 for k in ('width','height')):
+                failures.append(n['id'])
+                continue
+            # 不允许祖先缩放把大切图伪装成小规格；合法旋转/反射保持单位长度。
+            for part in [n] + [nodes[k] for k in ancestors if k != root]:
+                t = part.get('relative_transform')
+                if not t:
+                    unknown.append(part['id']); continue
+                a,b = t[0][:2]; c,d = t[1][:2]
+                if abs(a*a+c*c-1) > .001 or abs(b*b+d*d-1) > .001 or abs(a*b+c*d) > .001:
+                    failures.append(part['id'])
+    result.append(check_item('snapshot.resource_scale', 'fail' if failures else ('unverified' if unknown else 'pass'), '目标正式实例以切图原尺寸1×装配，旋转和反射允许，缩略图另行等比检查', failures+unknown))
+    # 安全区使用采集的实际渲染边界；未提供区域证据不能以空违规表宣布通过。
+    failures, unknown = [], []
+    ids = snapshot.get('content_safe_ids', [])
+    regions = config.get('canvas', {}).get('reserved_regions')
+    if regions is None:
+        unknown.append('未提供顶部/底部状态点区域')
+    if not ids:
+        unknown.append('缺少内容边界清单')
+    roots = {config[key]: descendants(nodes, config[key]) for key in ('active_id','aod_id')}
+    for identity in ids:
+        owner = next((root for root,members in roots.items() if identity in members), None)
+        if owner is None:
+            failures.append(str(identity)); continue
+        n = nodes[identity]
+        if not effectively_visible(n,nodes,owner):
+            continue
+        box = n.get('render_bounds')
+        transform = nodes[owner].get('absolute_transform')
+        if not box or not transform or transform[0][:2] != [1,0] or transform[1][:2] != [0,1]:
+            unknown.append(identity); continue
+        ox, oy = transform[0][2], transform[1][2]
+        x, y, w, h = box['x']-ox, box['y']-oy, box['width'], box['height']
+        if any(not contains(x+dx,y+dy,spec['width'],spec['height'],spec['shape'],spec['corner_radius'],spec['safe_margin']) for dx in (0,w) for dy in (0,h)):
+            failures.append(identity)
+        for r in regions or []:
+            if x < r['x']+r['width'] and x+w > r['x'] and y < r['y']+r['height'] and y+h > r['y']:
+                failures.append(identity)
+    result.append(check_item('snapshot.safe_area', 'fail' if failures else ('unverified' if unknown else 'pass'), '按目标屏形核对指定功能内容渲染边界及状态点区域；背景装饰不套用内容留白', failures+unknown))
+    groups = snapshot.get('numeric_groups', [])
+    failures, unknown = [], []
+    for identity in groups:
+        group = nodes.get(identity)
+        if not group:
+            failures.append(str(identity)); continue
+        children = [n for n in nodes.values() if n.get('parent_id') == identity and effectively_visible(n,nodes,identity)]
+        if group.get('layoutMode') != 'HORIZONTAL' or group.get('itemSpacing') != 0 or group.get('primaryAxisAlignItems') == 'SPACE_BETWEEN':
+            failures.append(identity)
+        if not children or any(n.get('type') != 'INSTANCE' for n in children):
+            failures.append(identity)
+        # 顺序按快照中的子节点顺序，边框必须相接，包装节点不能伪造零间距。
+        for a,b in zip(children,children[1:]):
+            if not all(is_finite_number(v) for v in (a.get('x'),a.get('width'),b.get('x'))):
+                unknown.append(identity)
+            elif abs(a['x']+a['width']-b['x']) > .001:
+                failures.append(identity)
+    result.append(check_item('snapshot.numeric_spacing', 'fail' if failures else ('unverified' if unknown or not groups else 'pass'), '完整数值切图水平自动布局、零间距且相邻切图边框相接；字段/单位在外层排布', failures+unknown))
+    return result
+
+
 def validate_snapshot(snapshot: dict) -> list[dict]:
     checks: list[dict] = []
     config = snapshot.get("config") if isinstance(snapshot.get("config"), dict) else {}
@@ -490,10 +596,35 @@ def validate_snapshot(snapshot: dict) -> list[dict]:
     checks.append(check_item("snapshot.pagination", "pass", "合并快照页数完整，节点数与唯一 ID 一致"))
 
     section_ids = descendants(nodes_by_id, config["section_id"])
-    outside = [node["id"] for node in nodes if node.get("id") not in section_ids]
+    shared_ids, ancestor_ids, invalid_shared = set(), set(), []
+    for identity in config.get("shared_master_ids", []):
+        master = nodes_by_id.get(identity)
+        if not master or master.get("type") != "COMPONENT":
+            invalid_shared.append(str(identity))
+            continue
+        shared_ids.update(descendants(nodes_by_id, identity))
+        ancestor_ids.update(descendants_up(master, nodes_by_id, config["section_id"]))
+    pending = list(shared_ids)
+    visited_dependencies = set()
+    while pending:
+        identity = pending.pop()
+        if identity in visited_dependencies:
+            continue
+        visited_dependencies.add(identity)
+        n = nodes_by_id[identity]
+        if n.get('type') == 'INSTANCE':
+            master = nodes_by_id.get(n.get('main_component_id'))
+            if not master or master.get('type') != 'COMPONENT':
+                invalid_shared.append(identity)
+                continue
+            dependency_ids = descendants(nodes_by_id, master['id'])
+            pending.extend(dependency_ids - shared_ids)
+            shared_ids.update(dependency_ids)
+            ancestor_ids.update(descendants_up(master, nodes_by_id, config['section_id']))
+    outside = invalid_shared + [node["id"] for node in nodes if node.get("id") not in section_ids | shared_ids | ancestor_ids]
     checks.append(check_item("snapshot.section_scope", "fail" if outside else "pass", "发现指定 section 外节点" if outside else "所有节点都位于指定 section", outside))
 
-    board_ids = descendants(nodes_by_id, config["asset_board_id"])
+    board_ids = descendants(nodes_by_id, config["asset_board_id"]) | shared_ids
     export_items = snapshot.get("export_items", [])
     item_errors = []
     formal_nodes = []
@@ -505,7 +636,18 @@ def validate_snapshot(snapshot: dict) -> list[dict]:
             formal_nodes.append(node)
     if not any(item.get("role") == "presentation_main" for item in export_items if isinstance(item, dict)):
         item_errors.append("缺少 presentation_main 导出映射")
-    board_components = [node for node in nodes if node.get("id") in board_ids and node.get("type") == "COMPONENT"]
+    resource_ids = config.get("resource_ids")
+    if resource_ids is not None:
+        invalid_resources = set(resource_ids) - {n['id'] for n in nodes if n['id'] in board_ids and n.get('type') == 'COMPONENT'}
+        checks.append(check_item("snapshot.resource_scope", "fail" if invalid_resources or len(set(resource_ids)) != len(resource_ids) else "pass", "核对目标资源映射中的真实母件", sorted(invalid_resources)))
+    board_components = [node for node in nodes if node.get("id") in board_ids and node.get("type") == "COMPONENT" and (resource_ids is None or node['id'] in resource_ids) and (node['id'] not in shared_ids or node['id'] in config.get('shared_master_ids', []) or node['id'] in descendants(nodes_by_id, config['asset_board_id']))]
+    try:
+        spec = screen_spec(config.get('canvas'))
+    except ValueError as exc:
+        checks.append(check_item('snapshot.target_geometry', 'fail', str(exc)))
+        return checks
+    if 'canvas' in config:
+        checks.extend(validate_target_geometry(snapshot, spec))
     position_failures, position_unknown, visited = [], [], set()
     children = {}
     for node in nodes:
@@ -528,7 +670,7 @@ def validate_snapshot(snapshot: dict) -> list[dict]:
         visited.add(node["id"])
         if not all(is_finite_number(node.get(k)) for k in ("x", "y")):
             position_unknown.append(node["id"])
-        elif node["id"] not in pointer_ids:
+        elif node["id"] not in pointer_ids and node.get("parent_id") != config["preview_id"]:
             decimal_text = snapshot.get("text_geometry") is True and text_source(node, nodes_by_id)
             decimal_digit = snapshot.get("digit_geometry") is True and digit_source(node, nodes_by_id)
             precision = 10 if decimal_text or decimal_digit else 1
@@ -583,6 +725,7 @@ def validate_snapshot(snapshot: dict) -> list[dict]:
     asset_ids = {item.get("node_id") for item in asset_items}
     expected_asset_ids = {node["id"] for node in board_components} - source_only_ids
     uncovered = sorted(expected_asset_ids - asset_ids)
+    item_errors.extend(f"未映射的目标资源:{i['node_id']}" for i in asset_items if i.get("role") == "asset" and i["node_id"] not in expected_asset_ids)
     wrong_paths = [item.get("node_id") for item in asset_items if item.get("node_id") in expected_asset_ids and nodes_by_id.get(item.get("node_id"), {}).get("name", "") + ".png" != item.get("path")]
     components = [node for node in board_components if node["id"] in expected_asset_ids]
     duplicate_names = sorted(name for name, count in Counter(node.get("name") for node in components).items() if name and count > 1)
@@ -639,7 +782,7 @@ def validate_snapshot(snapshot: dict) -> list[dict]:
             wrong.append(config[container_field])
         else:
             container = nodes_by_id[config[container_field]]
-            expectation = snapshot.get("assembly_expectations", {}).get(container_field, {})
+            expectation = (fit_preview(spec) if container_field == "preview_id" and "canvas" in config else snapshot.get("assembly_expectations", {}).get(container_field, {}))
             expected_x = expectation.get("x", 0)
             expected_y = expectation.get("y", 0)
             expected_width = expectation.get("width", container.get("width"))
@@ -668,6 +811,11 @@ def validate_snapshot(snapshot: dict) -> list[dict]:
                 ):
                     assembly_failures.append(instance["id"])
         instance_checks.extend(wrong)
+    active_ids = descendants(nodes_by_id, config['active_id'])
+    for n in (nodes_by_id[i] for i in active_ids if nodes_by_id[i].get('type') == 'INSTANCE'):
+        if not any(nodes_by_id[i].get('type') == 'INSTANCE' for i in descendants_up(n,nodes_by_id,config['active_id'])):
+            if n.get('main_component_id') not in expected_asset_ids | source_only_ids:
+                instance_checks.append(n['id'])
     aod_ids = descendants(nodes_by_id, config["aod_id"])
     aod_instances = [node for node in nodes if node.get("id") in aod_ids and node.get("type") == "INSTANCE"]
     aod_top_instances = [node for node in aod_instances if not any(nodes_by_id[ancestor_id].get("type") == "INSTANCE" for ancestor_id in descendants_up(node, nodes_by_id, config["aod_id"]))]
@@ -949,7 +1097,7 @@ def validate_snapshot(snapshot: dict) -> list[dict]:
     checks.append(check_item("snapshot.animations", animation_status, "未声明动画资源" if animation_status == "not_applicable" else ("动画帧缺失、错序、尺寸不一或缺导出设置" if animation_failures else "动画原始帧数量、序列、尺寸和导出设置通过"), animation_failures))
     if snapshot.get("pointers") or snapshot.get("face_type") == "analog":
         pointers = snapshot.get("pointers", [])
-        errors, measured = validate_pointers(snapshot, pointers)
+        errors, measured = validate_pointers(snapshot, pointers, canvas=(spec["width"], spec["height"]), safe_margin=spec["safe_margin"], shape=spec["shape"], corner_radius=spec["corner_radius"])
         unknown = [p['id'] for p in measured if p['sweep_status'] == 'unverified']
         status = "fail" if errors else ("unverified" if not pointers or unknown else "pass")
         checks.append(check_item("snapshot.pointers", status, "核对实际指针母件、旋转矩阵、轴心、全周安全区及遮挡顺序；旋转平移不强制取整", errors+unknown))
@@ -971,6 +1119,10 @@ def validate_pngs(snapshot: dict, exports_dir: Path) -> list[dict]:
     text_asset_ids = {node_id for family in snapshot.get("resource_families", []) for node_id in family.get("node_ids", [])}
     failures = []
     images = {}
+    try:
+        spec = screen_spec(snapshot.get('config', {}).get('canvas'))
+    except ValueError as exc:
+        return [check_item('exports.target_geometry', 'fail', str(exc))]
     for item in export_items:
         node = nodes_by_id.get(item.get("node_id"))
         path = exports_dir / item.get("path", "")
@@ -981,7 +1133,8 @@ def validate_pngs(snapshot: dict, exports_dir: Path) -> list[dict]:
             failures.append(f"缺少 PNG：{path}")
             continue
         try:
-            image = Image.open(path).convert("RGBA")
+            with Image.open(path) as source:
+                image = source.convert("RGBA")
             images[node.get("id")] = image
             settings = [value for value in node.get("export_settings", []) if value.get("format") == "PNG"]
             setting = item.get("setting", settings[0] if len(settings) == 1 else None)
@@ -1008,6 +1161,34 @@ def validate_pngs(snapshot: dict, exports_dir: Path) -> list[dict]:
                 # 抗锯齿可触及边缘像素；是否切边由原始完整字形范围核对，不能强制留一整行透明像素。
         except Exception as exc:
             failures.append(f"PNG 无法读取：{path} ({exc})")
+    if 'canvas' in snapshot.get('config', {}):
+        config = snapshot['config']
+        for item in export_items:
+            image = images.get(item.get('node_id'))
+            if image is None:
+                continue
+            n = nodes_by_id[item['node_id']]
+            setting = item.get('setting', n.get('export_settings', [{}])[0])
+            expected_scale = 5 if item.get('role') == 'presentation_main' else 1
+            if setting.get('constraint') != {'type':'SCALE','value':expected_scale}:
+                failures.append(f"目标导出倍率错误：{item['path']}")
+            if item.get('role') == 'aod_full' or item['node_id'] == config.get('background_id'):
+                if image.size != (spec['width'],spec['height']):
+                    failures.append(f"全屏资源与目标尺寸不符：{item['path']}")
+            if item['node_id'] == config.get('preview_id'):
+                if list(image.size) != spec['preview']:
+                    failures.append(f"缩略图尺寸错误：{item['path']}")
+                else:
+                    fit = fit_preview(spec)
+                    bad = False
+                    for y in range(image.height):
+                        for x in range(image.width):
+                            inside = contains(x+.5-fit['x'], y+.5-fit['y'], fit['width'],fit['height'],spec['shape'],spec['corner_radius']*fit['scale'], margin=-1)
+                            rgba = image.getpixel((x,y))
+                            if rgba[3] != 255 or (not inside and rgba[:3] != (0,0,0)):
+                                bad = True; break
+                        if bad: break
+                    if bad: failures.append(f"缩略图屏形外未保持不透明黑底：{item['path']}")
     checks = [check_item("exports.png", "fail" if failures else "pass", "；".join(failures) if failures else "所有显式正式导出 PNG 存在、尺寸正确且文字非空；切边另由原始字形边界检查", failures)]
     aod_items = [item for item in export_items if item.get("role") == "aod_full"]
     if len(aod_items) != 1:
@@ -1020,19 +1201,19 @@ def validate_pngs(snapshot: dict, exports_dir: Path) -> list[dict]:
             checks.append(check_item("exports.aod_brightness", "unverified", "AOD 全屏 PNG 缺失或不可读，无法计算亮像素比例", [item.get("node_id")]))
         else:
             width, height = image.size
-            radius = min(width, height) / 2
-            center_x, center_y = width / 2, height / 2
+            shape = spec["shape"]
+            radius = spec["corner_radius"] * width / spec["width"]
             bright = total = 0
             for y in range(height):
                 for x in range(width):
-                    if (x + .5 - center_x) ** 2 + (y + .5 - center_y) ** 2 <= radius ** 2:
+                    if contains(x+.5, y+.5, width, height, shape, radius):
                         total += 1
                         red, green, blue, alpha = image.getpixel((x, y))
                         composited = tuple((channel * alpha + 127) // 255 for channel in (red, green, blue))
                         if any(channel > 0 for channel in composited):
                             bright += 1
             ratio = bright / total if total else 0
-            checks.append(check_item("exports.aod_brightness", "fail" if ratio > .10 else "pass", f"AOD 圆屏内合成黑底后 RGB>0 的亮像素比例 {ratio:.4%}，阈值 10%", [node["id"]]))
+            checks.append(check_item("exports.aod_brightness", "fail" if ratio > .10 else "pass", f"AOD 实际屏幕可见区域内合成黑底后 RGB>0 的亮像素比例 {ratio:.4%}，阈值 10%", [node["id"]]))
     return checks
 
 
@@ -1076,6 +1257,7 @@ def main() -> int:
             if not isinstance(snapshot, dict):
                 raise ValueError("根节点必须是 JSON 对象")
             checks.extend(validate_snapshot(snapshot))
+            checks.extend(validate_target_binding(data, snapshot))
             checks.append(check_item("snapshot.stability", "pass" if stable_snapshot(snapshot) else "unverified", "核对采集前后内容与引用签名；旧快照不证明稳定"))
         except (OSError, json.JSONDecodeError, ValueError) as exc:
             checks.append(check_item("snapshot.structure", "fail", f"快照无法读取：{exc}", [str(args.snapshot)]))

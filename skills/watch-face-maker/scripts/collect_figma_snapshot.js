@@ -15,13 +15,42 @@ async function collectSnapshot(config) {
   const section = await figma.getNodeByIdAsync(config.section_id);
   if (!section) throw new Error(`找不到 section：${config.section_id}`);
   const allNodes = [];
+  const seen = new Set();
+  const traversed = new Set();
+  const sharedRoots = [];
+  const ancestors = [];
   const visit = (node) => {
-    allNodes.push(node);
+    if (traversed.has(node.id)) return;
+    traversed.add(node.id);
+    if (!seen.has(node.id)) { seen.add(node.id); allNodes.push(node); }
     if ("children" in node && !(config.skip_instance_children && node.type === "INSTANCE")) {
       node.children.forEach(visit);
     }
   };
   visit(section);
+  for (const id of config.shared_master_ids || []) {
+    const master = await figma.getNodeByIdAsync(id);
+    if (!master || master.type !== "COMPONENT") throw new Error(`共享母件无效：${id}`);
+    sharedRoots.push(master);
+  }
+  // 共享母件的组件依赖及祖先样式必须纳入同轮签名；不采集无关兄弟分区。
+  for (let i = 0; i < sharedRoots.length; i++) {
+    const root = sharedRoots[i];
+    visit(root);
+    for (const n of [root, ...("findAll" in root ? root.findAll(n => n.type === "INSTANCE") : [])]) {
+      if (n.type !== "INSTANCE") continue;
+      const m = await n.getMainComponentAsync();
+      if (!m) throw new Error(`共享母件依赖断链：${n.id}`);
+      if (!seen.has(m.id) && !sharedRoots.some(r => r.id === m.id)) sharedRoots.push(m);
+    }
+    let parent = root.parent;
+    while (parent && !["PAGE", "DOCUMENT"].includes(parent.type)) {
+      if (!seen.has(parent.id)) {
+        seen.add(parent.id); allNodes.push(parent); ancestors.push(parent);
+      }
+      parent = parent.parent;
+    }
+  }
 
   // 每页都记录整组几何签名，拒绝把编辑中的不同版本拼成完整快照。
   const canonical = (value) => {
@@ -35,7 +64,7 @@ async function collectSnapshot(config) {
     "clipsContent", "exportSettings", "effects", "characters", "fontName", "fontSize", "strokeWeight", "strokeAlign",
     "lineHeight", "letterSpacing", "textAlignHorizontal", "textAlignVertical", "vectorPaths", "vectorNetwork",
     "textStyleId", "fillStyleId", "componentProperties", "overrides", "layoutMode", "itemSpacing", "constraints",
-    "cornerRadius", "boundVariables", "paddingLeft", "paddingRight", "paddingTop", "paddingBottom",
+    "cornerRadius", "primaryAxisAlignItems", "boundVariables", "paddingLeft", "paddingRight", "paddingTop", "paddingBottom",
     "blendMode", "isMask", "maskType", "booleanOperation", "strokeCap", "strokeJoin", "dashPattern",
     "topLeftRadius", "topRightRadius", "bottomLeftRadius", "bottomRightRadius", "cornerSmoothing",
     "strokeTopWeight", "strokeBottomWeight", "strokeLeftWeight", "strokeRightWeight", "arcData", "resolvedVariableModes"];
@@ -48,11 +77,16 @@ async function collectSnapshot(config) {
   };
   const signatureOf = (references = {}) => {
     let hash = 2166136261;
+    const scanned = new Set();
     const scan = (node) => {
+      if (scanned.has(node.id)) return;
+      scanned.add(node.id);
       hash = hashText(nodeContent(node, references), hash);
       if ("children" in node && !(config.skip_instance_children && node.type === "INSTANCE")) node.children.forEach(scan);
     };
     scan(section);
+    sharedRoots.forEach(scan);
+    for (const parent of ancestors) if (!scanned.has(parent.id)) hash = hashText(nodeContent(parent, references), hash);
     return hash.toString(16);
   };
   const references = async () => {

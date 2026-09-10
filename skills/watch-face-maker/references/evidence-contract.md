@@ -114,3 +114,7 @@ checkpoint("review/next-run.json", next_run)
 若主体快照跳过实例子树，可以用同轮Figma只读遍历补充`composition_proof`：`capture_signature`必须与该快照一致，`roots`逐一覆盖主稿、AOD和预览，记录`root_id`、实际遍历数`visited`及每个可见叶子的`id/type/instance_id/master_id`。必须真的展开实例遍历；不以手填零违规数代替叶子记录。此证据只补足实例组装检查，不代替内部样式、几何或真机行为检查。
 
 纯数据指针进度使用`progress_representation: "pointers"`，同时提供实际`pointers`映射；进度条带底检查为不适用，指针轴心/扫过范围仍必须验证。
+
+## 多尺寸任务
+
+多尺寸适配时按[多尺寸适配](multi-size.md)的目标规格、同名资源作用范围、共享采集和批次证据执行。单尺寸480兼容入口保留；不把480尺寸、圆形掩模或256缩略图固定应用到其他目标。
