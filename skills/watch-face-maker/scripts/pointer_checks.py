@@ -24,11 +24,31 @@ def transform_at(pivot, center, angle):
     return [[c, -s, cx-c*px+s*py], [s, c, cy-s*px-c*py]]
 
 
+def _screen_transform(node, nodes, roots):
+    """复合到Active/AOD局部坐标，排除其在编辑画布上的位置。"""
+    transform = node.get('relative_transform')
+    parent_id, layer_id = node.get('parent_id'), node['id']
+    if not roots:  # 兼容没有配置根节点的旧直接子层快照。
+        return transform, parent_id, layer_id
+    seen = {node['id']}
+    while transform and parent_id not in roots:
+        parent = nodes.get(parent_id)
+        if not parent or parent_id in seen or not parent.get('relative_transform'):
+            return None, parent_id, layer_id
+        seen.add(parent_id)
+        a, b = parent['relative_transform'], transform
+        transform = [[a[r][0]*b[0][c] + a[r][1]*b[1][c] + (a[r][2] if c == 2 else 0)
+                      for c in range(3)] for r in range(2)]
+        layer_id, parent_id = parent_id, parent.get('parent_id')
+    return transform, parent_id, layer_id
+
+
 def validate_pointers(snapshot, pointers, canvas=(480, 480), safe_margin=4, shape="circle", corner_radius=0):
     nodes = {n['id']: n for n in snapshot['nodes']}
     errors, measured = [], []
     order = {n['id']: i for i, n in enumerate(snapshot['nodes'])}
     layers = {}
+    roots = {snapshot.get('config', {}).get(k) for k in ('active_id', 'aod_id')} - {None}
     for p in pointers:
         n, master = nodes.get(p['instance_id']), nodes.get(p['master_id'])
         if not n or not master:
@@ -42,9 +62,9 @@ def validate_pointers(snapshot, pointers, canvas=(480, 480), safe_margin=4, shap
             errors.append(f"指针局部轴心或屏幕轴心不是整数像素：{master['id']}")
         if not (w > 0 and h > 0 and w % 2 == h % 2 == 0 and 0 <= px <= w and 0 <= py <= h):
             errors.append(f"指针尺寸或局部轴心无效：{master['id']}")
-        transform = n.get('relative_transform')
+        transform, screen_root, layer_id = _screen_transform(n, nodes, roots)
         if not transform:
-            errors.append(f"指针缺少实际变换：{n['id']}")
+            errors.append(f"指针缺少实际变换或完整祖先链：{n['id']}")
             continue
         actual_center = [transform[0][0]*px+transform[0][1]*py+transform[0][2],
                          transform[1][0]*px+transform[1][1]*py+transform[1][2]]
@@ -62,7 +82,7 @@ def validate_pointers(snapshot, pointers, canvas=(480, 480), safe_margin=4, shap
         measured.append({'id': n['id'], 'pivot_error': delta, 'sweep_radius': sweep,
                          'sweep_status': ('fail' if bounds and not contains(*p['center'], *canvas, shape, corner_radius, safe_margin+sweep) else 'pass') if bounds else 'unverified'})
         if p['role'] in {'Hour', 'Minute', 'Second', 'Hub'}:
-            layers.setdefault(n.get('parent_id'), {})[p['role']] = order[n['id']]
+            layers.setdefault(screen_root, {})[p['role']] = order[layer_id]
     for parent, values in layers.items():
         sequence = [values[k] for k in ('Hour', 'Minute', 'Second', 'Hub') if k in values]
         if sequence != sorted(sequence):
