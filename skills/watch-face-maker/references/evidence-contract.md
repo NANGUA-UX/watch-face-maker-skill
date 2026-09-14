@@ -118,3 +118,15 @@ checkpoint("review/next-run.json", next_run)
 ## 多尺寸任务
 
 多尺寸适配时按[多尺寸适配](multi-size.md)的目标规格、同名资源作用范围、共享采集和批次证据执行。单尺寸480兼容入口保留；不把480尺寸、圆形掩模或256缩略图固定应用到其他目标。
+
+
+## 制作交叉检查
+
+`validate_manifest.py --snapshot ...` 已调用 `delivery_guards.py`。制作阶段可以将真实局部节点交给 `validate_delivery_guards(snapshot)` 提前检查，但局部结果不证明分页完整、同轮绑定或整盘验收。缺少下列映射或原始节点时报“未验证”，不是自动补齐或放行。
+
+- `icon_orientations: [{instance_id, root_id, source: {file_key, node_id, key, relative_transform}, placement_transform?}]`：`source` 必须来自本次正式库读取，`instance_id` 是当前本地库实例，`root_id` 是其切图容器。复合实际祖先变换，去掉平移和尺寸缩放后比较库源方向；`placement_transform` 只记录已确认的额外旋转/反射，默认单位矩阵。正负行列式都可能合法。结果只覆盖所列实例的结构朝向，不证明库源子层、覆盖属性及最终渲染相同；每个实际使用的图标仍须对照当前库源与新实例画面，不得根据一次历史修复推导全族翻转。
+- `state_families[].layout: {parent_id, origin:[x,y], step:[dx,dy], columns}`：原点和步长来自当前已确认资源行或网格，按序号行优先填槽。检查原母件的实际X/Y、父分区、显隐与相互覆盖；数量、序号连续性、显示引用和PNG非空仍分别验证。用户重新排列时先更新排布基准，不回放最初坐标。非网格排布不填写虚假网格，保留未验证并人工检查。
+- `pointers[].annotation: {frame_id, instance_id, pivot_node_id, line_node_id, offset?:[x,y]}`：ID分别指向不导出的标注画框、零位指针实例、轴心点、垂直尺寸红线。读取实际原始变换计算 `center + offset - pivot`、轴心点中心、红线两端；不根据标签文本判定。并排AOD有显示偏移时明确记录 `offset`，每个配对分别映射。主盘和偏心小盘均用自身轴心；此检查不改变用户要求的整屏旋转框尺寸。
+- `resource_ownership: [{master_id, behavior:"static|dynamic", destination:"background|independent", reason, independent_behavior?}]` 与 `config.background_id`：沿用已确认的逐元素拆分决定，不从节点名称推断功能。背景归属应有背景源实例、关闭独立导出并纳入已有 `source_only_node_ids`；Active/AOD不再重复组装同一固定图标。独立资源仍有正式导出，不能同时固定在背景中。静态资源确有独立行为时在 `independent_behavior` 记录具体依据，不强制合并。已烘焙且不再保留源实例的背景需另验合成像素，自动检查不得仅凭自填说明通过。
+
+新建实例、排列状态、生成标注、装配背景之后分别运行相关检查；正式导出前统一复核。修改只针对不符的原节点，重复执行应无新增或重复翻转；对用户维护区域先读取当前结构。旧的全量建盘脚本不得用于回放修复。原始节点检查、库图标实际渲染对照、合成前后像素对比、用户视觉确认与设备接入保持独立记录。

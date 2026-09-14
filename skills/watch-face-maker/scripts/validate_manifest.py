@@ -8,6 +8,7 @@ from collections import Counter
 from datetime import datetime, timezone
 import json
 import math
+from delivery_guards import validate_delivery_guards
 import re
 import sys
 from pathlib import Path
@@ -586,6 +587,7 @@ def validate_snapshot(snapshot: dict) -> list[dict]:
         for check_id in (
             "snapshot.section_scope", "snapshot.component_names", "snapshot.component_exports",
             "snapshot.instance_links", "snapshot.assembly_layout", "snapshot.deep_composition", "snapshot.text_measurements",
+            "snapshot.icon_orientation", "snapshot.state_layout", "snapshot.pointer_annotations", "snapshot.resource_ownership",
             "snapshot.resource_families", "snapshot.shared_data", "snapshot.state_families", "snapshot.time_roles", "snapshot.aod_style", "snapshot.animations", "snapshot.integer_positions", "snapshot.digit_geometry", "snapshot.text_geometry", "snapshot.progress_tracks",
         ):
             checks.append(check_item(check_id, "unverified", "快照不完整，不能据此推定通过"))
@@ -1105,6 +1107,7 @@ def validate_snapshot(snapshot: dict) -> list[dict]:
         checks = [c for c in checks if c['id'] not in {"snapshot.time_roles", "snapshot.aod_style"}]
         errors, unknown = validate_aod_pointers(snapshot, snapshot.get("pointers", []))
         checks.append(check_item("snapshot.analog_aod", "fail" if errors else ("unverified" if unknown else "pass"), "亮屏与AOD时分针同轴、同角、同尺寸；AOD母件及可见展示实例为#B3B3B3描边", errors+unknown))
+    checks.extend(validate_delivery_guards(snapshot))
     return checks
 
 
