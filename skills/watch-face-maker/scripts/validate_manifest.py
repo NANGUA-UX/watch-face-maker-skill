@@ -1159,8 +1159,9 @@ def validate_snapshot(snapshot: dict) -> list[dict]:
         checks.append(check_item("snapshot.pointers", status, "核对实际指针母件、旋转矩阵、轴心、全周安全区及遮挡顺序；旋转平移不强制取整", errors+unknown))
     if snapshot.get("face_type") == "analog":
         checks = [c for c in checks if c['id'] not in {"snapshot.time_roles", "snapshot.aod_style"}]
+    if snapshot.get("face_type") == "analog" or any(p.get("role", "").endswith("Dark") for p in snapshot.get("pointers", [])):
         errors, unknown = validate_aod_pointers(snapshot, snapshot.get("pointers", []))
-        checks.append(check_item("snapshot.analog_aod", "fail" if errors else ("unverified" if unknown else "pass"), "亮屏与AOD时分针同轴、同角、同尺寸；AOD母件及可见展示实例为#B3B3B3描边", errors+unknown))
+        checks.append(check_item("snapshot.analog_aod", "fail" if errors else ("unverified" if unknown else "pass"), "亮屏与AOD指针同轴、同角、同尺寸；AOD母件及可见展示实例为至少2px的#B3B3B3描边", errors+unknown))
     checks.extend(validate_delivery_guards(snapshot))
     return checks
 

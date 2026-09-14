@@ -125,11 +125,15 @@ def validate_aod_pointers(snapshot, pointers):
                 continue
             fills = [p for p in n['fills'] if p.get('visible', True) and p.get('opacity', 1) > 0]
             strokes = [p for p in n['strokes'] if p.get('visible', True) and p.get('opacity', 1) > 0]
-            weight = n.get('stroke_weight', n.get('strokeWeight', 0))
-            if fills or len(strokes) != 1 or weight <= 0 or strokes[0].get('type') != 'SOLID' or strokes[0].get('opacity', 1) != 1 or any(round(strokes[0].get('color', {}).get(k, -1)*255) != 179 for k in 'rgb'):
-                errors.append(f'AOD指针不是#B3B3B3无填充描边：{n["id"]}')
+            weight = n.get('stroke_weight', n.get('strokeWeight'))
+            if isinstance(weight, bool) or not isinstance(weight, (int, float)) or not math.isfinite(weight):
+                unknown.append(f'AOD指针缺少有效原始描边宽度：{n["id"]}')
+                continue
+            if fills or len(strokes) != 1 or weight < 2 or strokes[0].get('type') != 'SOLID' or strokes[0].get('opacity', 1) != 1 or any(round(strokes[0].get('color', {}).get(k, -1)*255) != 179 for k in 'rgb'):
+                errors.append(f'AOD指针须为至少2px的#B3B3B3无填充描边：{n["id"]}')
 
-    for role in ('Hour', 'Minute'):
+    aod_roles = ['Hour', 'Minute'] + [role[:-4] for role in roles if role.endswith('Dark') and role not in ('HourDark', 'MinuteDark')]
+    for role in aod_roles:
         active, dark = roles.get(role), roles.get(role+'Dark')
         if not active or not dark:
             errors.append(f'AOD缺少{role}配对')
