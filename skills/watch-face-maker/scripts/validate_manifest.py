@@ -596,7 +596,8 @@ def validate_snapshot(snapshot: dict) -> list[dict]:
             "snapshot.icon_orientation", "snapshot.state_layout", "snapshot.pointer_annotations", "snapshot.resource_ownership",
             "snapshot.resource_families", "snapshot.time_cutout_pairs", "snapshot.shared_data", "snapshot.state_families", "snapshot.time_roles", "snapshot.aod_style", "snapshot.animations", "snapshot.integer_positions", "snapshot.digit_geometry", "snapshot.text_geometry", "snapshot.progress_tracks",
         ):
-            checks.append(check_item(check_id, "unverified", "快照不完整，不能据此推定通过"))
+            analog_time_pairs = check_id == "snapshot.time_cutout_pairs" and snapshot.get("face_type") == "analog"
+            checks.append(check_item(check_id, "not_applicable" if analog_time_pairs else "unverified", "纯指针表盘不要求数字时间字模配对" if analog_time_pairs else "快照不完整，不能据此推定通过"))
         return checks
     if len(nodes_by_id) != len(nodes):
         checks.append(check_item("snapshot.pagination", "fail", "合并快照含重复节点 ID"))
@@ -969,7 +970,10 @@ def validate_snapshot(snapshot: dict) -> list[dict]:
             time_pairs[active["id"]] = dark["id"]
             time_pairs[dark["id"]] = active["id"]
     pair_status = "fail" if pair_failures else ("unverified" if pair_unknown else "pass")
-    checks.append(check_item("snapshot.time_cutout_pairs", pair_status, "亮屏/AOD时间字模按实际字符逐对同宽同高；包括0–9及分隔符" if pair_status == "pass" else "时间字模配对尺寸不一致、字符不完整或缺少原始配对证据", pair_failures + pair_unknown))
+    if snapshot.get("face_type") == "analog":
+        checks.append(check_item("snapshot.time_cutout_pairs", "not_applicable", "纯指针表盘不要求数字时间字模配对"))
+    else:
+        checks.append(check_item("snapshot.time_cutout_pairs", pair_status, "亮屏/AOD时间字模按实际字符逐对同宽同高；包括0–9及分隔符" if pair_status == "pass" else "时间字模配对尺寸不一致、字符不完整或缺少原始配对证据", pair_failures + pair_unknown))
 
     family_failures = []
     family_unverified = []
@@ -982,7 +986,11 @@ def validate_snapshot(snapshot: dict) -> list[dict]:
         if not is_finite_number(vertical_padding) or vertical_padding < 0:
             family_unverified.append(family.get("name", "未命名资源族"))
             continue
-        paired_measurements = [measurements[time_pairs[node_id]] for node_id in family.get("node_ids", []) if time_pairs.get(node_id) in measurements]
+        paired_ids = [time_pairs[node_id] for node_id in family.get("node_ids", []) if node_id in time_pairs]
+        if any(node_id not in measurements for node_id in paired_ids):
+            family_unverified.append(family.get("name", "未命名资源族"))
+            continue
+        paired_measurements = [measurements[node_id] for node_id in paired_ids]
         joint_measurements = family_measurements + paired_measurements
         common_height = rounded_multiple_of_four(max(item["glyph_bottom"] for item in joint_measurements) - min(item["glyph_top"] for item in joint_measurements) + 2 * vertical_padding)
         digit_measurements = [item for item in family_measurements if re.fullmatch(r"[0-9]", item["character"])]
