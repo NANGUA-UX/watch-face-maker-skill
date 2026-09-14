@@ -1,5 +1,7 @@
 # 表盘原始证据契约
 
+- 数字时间配对在`aod_style`中额外提供`active_node_name_prefix`，指向同尺寸亮屏时间字族；`node_name_prefix`仍指AOD字族。`snapshot.time_cutout_pairs`读取母件内部实际字符，完整配对0–9及全部时间分隔符，逐对核对宽高完全一致；重复字符、缺配对或不同尺寸失败，缺来源为未验证。两态为不同母件，不可用相同前缀自配对。文字尺寸最小值按两态联合边界计算，正式1×PNG尺寸另由导出检查确认。
+
 - 所有独立文字切图内部TEXT采集`text_align_horizontal`（Figma的`textAlignHorizontal`），值必须为`CENTER`；涵盖数字、单位、符号、星期、月份及文字标签。`snapshot.text_geometry`同时检查对齐属性与实际字形几何，位置看似居中但属性为LEFT/RIGHT/JUSTIFIED仍失败；缺属性为未验证。切换水平对齐后补偿可见字形X，复查母件和派生实例；垂直基线规则保持按排版语义执行。
 
 ## Figma 快照采集

@@ -594,7 +594,7 @@ def validate_snapshot(snapshot: dict) -> list[dict]:
             "snapshot.section_scope", "snapshot.component_names", "snapshot.component_exports",
             "snapshot.instance_links", "snapshot.assembly_layout", "snapshot.deep_composition", "snapshot.text_measurements",
             "snapshot.icon_orientation", "snapshot.state_layout", "snapshot.pointer_annotations", "snapshot.resource_ownership",
-            "snapshot.resource_families", "snapshot.shared_data", "snapshot.state_families", "snapshot.time_roles", "snapshot.aod_style", "snapshot.animations", "snapshot.integer_positions", "snapshot.digit_geometry", "snapshot.text_geometry", "snapshot.progress_tracks",
+            "snapshot.resource_families", "snapshot.time_cutout_pairs", "snapshot.shared_data", "snapshot.state_families", "snapshot.time_roles", "snapshot.aod_style", "snapshot.animations", "snapshot.integer_positions", "snapshot.digit_geometry", "snapshot.text_geometry", "snapshot.progress_tracks",
         ):
             checks.append(check_item(check_id, "unverified", "快照不完整，不能据此推定通过"))
         return checks
@@ -933,6 +933,44 @@ def validate_snapshot(snapshot: dict) -> list[dict]:
     measurement_status = "unverified" if not snapshot.get("resource_families") else ("fail" if measurement_failures else ("unverified" if measurement_unverified else "pass"))
     checks.append(check_item("snapshot.text_measurements", measurement_status, "文字母件不是 4 的倍数，或完整渲染范围超出切图边界" if measurement_failures else ("文字子节点测量不足，或被祖先裁切且无额外未裁测量" if measurement_unverified else "文字母件为4倍数；完整字形四边均未超出容器"), measurement_failures + measurement_unverified))
 
+    # Pair by actual character, including separators; never infer equality from the displayed time alone.
+    time_style = snapshot.get("aod_style", {})
+    pair_failures, pair_unknown, time_pairs, time_groups = [], [], {}, []
+    for key in ("active_node_name_prefix", "node_name_prefix"):
+        prefix = time_style.get(key)
+        group = {}
+        for master in board_components:
+            if not isinstance(prefix, str) or not prefix or not master.get("name", "").startswith(prefix):
+                continue
+            texts = [nodes_by_id[i] for i in descendants(nodes_by_id, master["id"]) if nodes_by_id[i].get("type") == "TEXT"]
+            if len(texts) != 1 or not texts[0].get("characters"):
+                pair_unknown.append(master["id"])
+                continue
+            char = texts[0]["characters"]
+            if char in group:
+                pair_failures.append(f"重复时间字符：{char}")
+            group[char] = master
+        if not group:
+            pair_unknown.append(key)
+        time_groups.append(group)
+    if all(time_groups):
+        active_chars, dark_chars = time_groups
+        if set(active_chars) != set(dark_chars) or not set("0123456789").issubset(active_chars):
+            pair_failures.append("亮屏/AOD必须完整配对0–9及所有时间分隔符")
+        for char in active_chars.keys() & dark_chars.keys():
+            active, dark = active_chars[char], dark_chars[char]
+            if active["id"] == dark["id"]:
+                pair_failures.append(f"亮屏/AOD不得指向同一母件：{char}")
+                continue
+            if not all(is_finite_number(n.get(k)) and n[k] > 0 for n in (active, dark) for k in ("width", "height")):
+                pair_unknown.append(char)
+            elif (active["width"], active["height"]) != (dark["width"], dark["height"]):
+                pair_failures.append(f"{char}: {active['id']} 与 {dark['id']} 切图宽高不同")
+            time_pairs[active["id"]] = dark["id"]
+            time_pairs[dark["id"]] = active["id"]
+    pair_status = "fail" if pair_failures else ("unverified" if pair_unknown else "pass")
+    checks.append(check_item("snapshot.time_cutout_pairs", pair_status, "亮屏/AOD时间字模按实际字符逐对同宽同高；包括0–9及分隔符" if pair_status == "pass" else "时间字模配对尺寸不一致、字符不完整或缺少原始配对证据", pair_failures + pair_unknown))
+
     family_failures = []
     family_unverified = []
     for family in snapshot.get("resource_families", []):
@@ -944,7 +982,9 @@ def validate_snapshot(snapshot: dict) -> list[dict]:
         if not is_finite_number(vertical_padding) or vertical_padding < 0:
             family_unverified.append(family.get("name", "未命名资源族"))
             continue
-        common_height = rounded_multiple_of_four(max(item["glyph_bottom"] for item in family_measurements) - min(item["glyph_top"] for item in family_measurements) + 2 * vertical_padding)
+        paired_measurements = [measurements[time_pairs[node_id]] for node_id in family.get("node_ids", []) if time_pairs.get(node_id) in measurements]
+        joint_measurements = family_measurements + paired_measurements
+        common_height = rounded_multiple_of_four(max(item["glyph_bottom"] for item in joint_measurements) - min(item["glyph_top"] for item in joint_measurements) + 2 * vertical_padding)
         digit_measurements = [item for item in family_measurements if re.fullmatch(r"[0-9]", item["character"])]
         common_width = max((item["minimum_width"] for item in digit_measurements), default=0)
         size_failure = any(item["size"][1] != common_height for item in family_measurements)
@@ -952,7 +992,7 @@ def validate_snapshot(snapshot: dict) -> list[dict]:
             size_failure = size_failure or any(item["size"][0] != common_width for item in digit_measurements)
             size_failure = size_failure or any(item["size"][0] != item["minimum_width"] for item in family_measurements if item not in digit_measurements)
         else:
-            size_failure = size_failure or any(item["size"][0] != item["minimum_width"] for item in family_measurements)
+            size_failure = size_failure or any(item["size"][0] != max(item["minimum_width"], measurements.get(time_pairs.get(node_id), {}).get("minimum_width", 0)) for node_id, item in zip(family.get("node_ids", []), family_measurements))
         baseline_groups = {}
         for item in family_measurements:
             # 数字以实际可见字形居中；7/9等高度不同的字形需要微调Y。
