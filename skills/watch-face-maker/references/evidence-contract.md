@@ -9,7 +9,7 @@
 采集器只遍历指定 section，不加载字体，不写节点，不发网络请求。`glyph_bounds` 是 Figma `absoluteRenderBounds` 的记录，不是 PNG alpha bounds。若字形的祖先被裁切，必须从临时无裁切测量源补入 `unclipped_glyph_bounds`，否则对应尺寸检查为 `unverified`。分页合并后可人工补充：
 
 - `roles: {"time_main_id": "...", "time_aod_id": "..."}`
-- `aod_style: {"node_name_prefix": "SampleFace/Num/Time-Dark/", "stroke_color": "#B3B3B3"}`：采集 TEXT 的 `fills`、`strokes`、`stroke_weight`、`stroke_align`；同时检查母件与 AOD 显示文字。旧快照缺少样式字段时为未验证，不能仅凭 Time-Dark 名称推定是描边。
+- `aod_style: {"node_name_prefix": "Dial1/Num/Time-Dark/", "stroke_color": "#B3B3B3"}`：采集 TEXT 的 `fills`、`strokes`、`stroke_weight`、`stroke_align`；同时检查数字0–9及时间分隔符的母件与 AOD 实际显示文字，无填充、规定灰色且描边至少2px。按每个目标原生尺寸采集缩放后的实际样式，不能只检查缩放前母件；加粗后另验完整渲染边界与PNG。旧快照缺少样式字段时为未验证，不能仅凭 Time-Dark 名称推定是描边。
 - `shared_data_policy: {"prefix": "SampleFace", "preserved_families": []}`：按实际母件字符、字号和样式核对共享数据族；单档使用Data，双档使用Large/Small且字号严格递减。`preserved_families`仅记录用户明确暂不调整的旧专用字模，须在项目需求中解释，不作为新项目默认排除名单。
 - `resource_families: [{"name": "...", "kind": "time|data|date|unit|symbol", "node_ids": ["..."]}]`
 - 同一共享数据族的`node_ids`必须包含对应符号和单位；`shared_data_policy.symbol_resources`记录`node_id`、实际`character`与目标`path`，检查遗漏改名或漏纳入统一高度的资源。`vertical_padding`默认0，按完整字形确定最小高度；旧族确需保留额外上下余量时显式记录该值与项目理由。

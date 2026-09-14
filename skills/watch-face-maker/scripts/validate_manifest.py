@@ -1075,10 +1075,10 @@ def validate_snapshot(snapshot: dict) -> list[dict]:
             if valid_stroke:
                 rgb = strokes[0].get("color", {})
                 valid_stroke = all(is_finite_number(rgb.get(key)) and round(rgb[key] * 255) == value for key, value in expected_rgb.items())
-            if fills or not valid_stroke or node["stroke_weight"] <= 0:
+            if fills or not valid_stroke or node["stroke_weight"] < 2:
                 style_failures.append(node["id"])
     style_status = "fail" if style_failures else ("unverified" if style_unknown else "pass")
-    checks.append(check_item("snapshot.aod_style", style_status, "AOD 描边、无填充或颜色不符合要求" if style_failures else ("缺少 AOD 原始样式证据" if style_unknown else f"AOD 母件与实际显示文字均无填充，描边为 {color}"), style_failures + style_unknown))
+    checks.append(check_item("snapshot.aod_style", style_status, "AOD 数字时间描边须至少 2 px、无填充且颜色符合要求" if style_failures else ("缺少 AOD 原始样式证据" if style_unknown else f"AOD 母件与实际显示文字均无填充，描边为 {color} 且至少 2 px"), style_failures + style_unknown))
 
     animation_failures = []
     animations = snapshot.get("animations", [])
