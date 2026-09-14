@@ -155,6 +155,7 @@ async function collectSnapshot(config) {
       record.characters = node.characters;
       record.font_name = plain(node.fontName);
       record.font_size = plain(node.fontSize);
+      record.text_align_horizontal = node.textAlignHorizontal;
       record.fills = plain(node.fills);
       record.strokes = plain(node.strokes);
       record.stroke_weight = plain(node.strokeWeight);

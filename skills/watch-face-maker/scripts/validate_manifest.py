@@ -436,6 +436,12 @@ def validate_digit_geometry(nodes_by_id: dict, all_text: bool = False) -> dict:
         if source is None:
             continue
         count += 1
+        if all_text:
+            alignment = node.get("text_align_horizontal")
+            if alignment is None:
+                unknown.append(node["id"])
+            elif alignment != "CENTER":
+                failures.append(node["id"])
         if not all(is_finite_number(node.get(k)) for k in ("width", "height", "x", "y")):
             unknown.append(node["id"])
             continue
@@ -455,7 +461,7 @@ def validate_digit_geometry(nodes_by_id: dict, all_text: bool = False) -> dict:
     label = "文字" if all_text else "数字"
     explanation = f"核对{count}个{label}文本：宽高偶数整数，X/Y最多一位小数，实际字形中心偏差不超过0.05px（另容许0.001px计算尾差）"
     if all_text:
-        explanation += "；单字符标点仅自动检查水平居中，垂直基线须另行核对"
+        explanation += "；文本水平对齐属性须为CENTER；单字符标点仅自动检查水平居中，垂直基线须另行核对"
     return check_item("snapshot.text_geometry" if all_text else "snapshot.digit_geometry", status, explanation, sorted(set(failures + unknown)))
 
 

@@ -1,5 +1,7 @@
 # 表盘原始证据契约
 
+- 所有独立文字切图内部TEXT采集`text_align_horizontal`（Figma的`textAlignHorizontal`），值必须为`CENTER`；涵盖数字、单位、符号、星期、月份及文字标签。`snapshot.text_geometry`同时检查对齐属性与实际字形几何，位置看似居中但属性为LEFT/RIGHT/JUSTIFIED仍失败；缺属性为未验证。切换水平对齐后补偿可见字形X，复查母件和派生实例；垂直基线规则保持按排版语义执行。
+
 ## Figma 快照采集
 
 在 `use_figma` 的只读 JavaScript 上下文调用 `await collectSnapshot(config)`。`config` 必须包含 `file_key`、`section_id`、`asset_board_id`、`main_id`、`active_id`、`aod_id`、`preview_id`；可用 `offset` 和 `limit` 分页，`limit` 默认为 20。每页返回 `page: {offset, limit, count}`、`total_nodes` 和 `next_offset`。节点过多时可设 `skip_instance_children: true`，此时仍记录实例本身和母件引用，报告会把深层可见叶子组装标为未验证。
