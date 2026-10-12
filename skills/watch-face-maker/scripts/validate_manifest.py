@@ -503,8 +503,11 @@ def digit_source(node: dict, nodes_by_id: dict) -> dict | None:
     return source if source and "/Num/" in source.get("name", "") and re.fullmatch(r"[0-9]", str(node.get("characters", ""))) else None
 
 
-def validate_digit_geometry(nodes_by_id: dict, all_text: bool = False) -> dict:
+def validate_digit_geometry(nodes_by_id: dict, all_text: bool = False, baseline_families=None) -> dict:
     failures, unknown, count = [], [], 0
+    baseline_ids = {identity: family.get('name') for family in baseline_families or []
+                    if family.get('baseline_policy') == 'shared_font_baseline' for identity in family.get('node_ids', [])}
+    baselines = {}
     for node in nodes_by_id.values():
         source = text_source(node, nodes_by_id) if all_text else digit_source(node, nodes_by_id)
         if source is None:
@@ -528,14 +531,23 @@ def validate_digit_geometry(nodes_by_id: dict, all_text: bool = False) -> dict:
             continue
         margins = (bounds["x"] - origin[0], bounds["y"] - origin[1], origin[0] + source["width"] - bounds["x"] - bounds["width"], origin[1] + source["height"] - bounds["y"] - bounds["height"])
         baseline_symbol = all_text and bool(re.fullmatch(r"[.:,;+-]", str(node.get("characters", ""))))
-        center_error = abs(margins[0] - margins[2]) if baseline_symbol else max(abs(margins[0] - margins[2]), abs(margins[1] - margins[3]))
+        shared_baseline = source['id'] in baseline_ids
+        if shared_baseline:
+            key = (baseline_ids[source['id']], json.dumps([node.get('font_name'), node.get('font_size')], sort_keys=True))
+            baselines.setdefault(key, []).append((node['id'], round(node['y'], 3)))
+        center_error = abs(margins[0] - margins[2]) if baseline_symbol or shared_baseline else max(abs(margins[0] - margins[2]), abs(margins[1] - margins[3]))
         if min(bounds["width"], bounds["height"]) <= 0 or min(margins) < 0 or center_error > .102:
             failures.append(node["id"])
+    for group in baselines.values():
+        if len({v for _, v in group}) > 1:
+            failures.extend(identity for identity, _ in group)
     status = "fail" if failures else ("unverified" if unknown or not count else "pass")
     label = "文字" if all_text else "数字"
     explanation = f"核对{count}个{label}文本：宽高偶数整数，X/Y最多一位小数，实际字形中心偏差不超过0.05px（另容许0.001px计算尾差）"
     if all_text:
         explanation += "；文本水平对齐属性须为CENTER；单字符标点仅自动检查水平居中，垂直基线须另行核对"
+    if baseline_ids:
+        explanation += "；明确采用shared_font_baseline的族检查共同基线、水平中心与完整边界"
     return check_item("snapshot.text_geometry" if all_text else "snapshot.digit_geometry", status, explanation, sorted(set(failures + unknown)))
 
 
@@ -798,8 +810,8 @@ def validate_snapshot(snapshot: dict, capability_modes: dict | None = None) -> l
     else:
         position_unknown.append("未声明整数定位要求")
     checks.append(check_item("snapshot.integer_positions", "fail" if position_failures else ("unverified" if position_unknown else "pass"), f"核对{len(visited)}个原生可见图层的局部X/Y；按已声明的文字或数字规则允许文本一位小数，其余布局保持整数；派生坐标由源组件和缩放保证" if not position_failures else "原生布局位置精度不满足规则", position_failures + position_unknown))
-    checks.append(validate_digit_geometry(nodes_by_id) if snapshot.get("digit_geometry") is True else check_item("snapshot.digit_geometry", "unverified", "未声明数字偶数尺寸与一位小数居中规则"))
-    checks.append(validate_digit_geometry(nodes_by_id, all_text=True) if snapshot.get("text_geometry") is True else check_item("snapshot.text_geometry", "unverified", "未声明完整文字切图几何规则，不能用数字检查代替"))
+    checks.append(validate_digit_geometry(nodes_by_id, baseline_families=snapshot.get('resource_families')) if snapshot.get("digit_geometry") is True else check_item("snapshot.digit_geometry", "unverified", "未声明数字偶数尺寸与一位小数居中规则"))
+    checks.append(validate_digit_geometry(nodes_by_id, all_text=True, baseline_families=snapshot.get('resource_families')) if snapshot.get("text_geometry") is True else check_item("snapshot.text_geometry", "unverified", "未声明完整文字切图几何规则，不能用数字检查代替"))
 
     progress_failures, progress_unknown = [], []
     progress_resources = snapshot.get("progress_resources", [])
@@ -974,7 +986,7 @@ def validate_snapshot(snapshot: dict, capability_modes: dict | None = None) -> l
     measurements = {}
     measurement_failures = []
     measurement_unverified = []
-    text_component_ids = {node_id for family in snapshot.get("resource_families", []) if family.get("kind") in {"time", "second", "data", "date", "unit", "symbol"} for node_id in family.get("node_ids", [])}
+    text_component_ids = {node_id for family in snapshot.get("resource_families", []) if family.get("kind") in {"time", "second", "data", "date", "unit", "symbol", "week", "month", "label"} for node_id in family.get("node_ids", [])}
     for component in components:
         if component["id"] not in text_component_ids:
             continue
@@ -1096,7 +1108,9 @@ def validate_snapshot(snapshot: dict, capability_modes: dict | None = None) -> l
             continue
         paired_measurements = [measurements[node_id] for node_id in paired_ids]
         joint_measurements = family_measurements + paired_measurements
-        common_height = rounded_multiple_of_four(max(item["glyph_bottom"] for item in joint_measurements) - min(item["glyph_top"] for item in joint_measurements) + 2 * vertical_padding)
+        group_top = min(item['glyph_top'] for item in joint_measurements)
+        grid_top = group_top + math.ceil(-group_top * 10 - .00001) / 10 if family.get('baseline_policy') == 'shared_font_baseline' else 0
+        common_height = rounded_multiple_of_four(max(item["glyph_bottom"] for item in joint_measurements) - group_top + grid_top + 2 * vertical_padding)
         digit_measurements = [item for item in family_measurements if re.fullmatch(r"[0-9]", item["character"])]
         common_width = max((item["minimum_width"] for item in digit_measurements), default=0)
         size_failure = any(item["size"][1] != common_height for item in family_measurements)

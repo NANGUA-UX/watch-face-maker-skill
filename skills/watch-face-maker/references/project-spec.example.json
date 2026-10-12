@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "operation": "create",
+  "task_mode": "replicate",
+  "complexity": "complex_visual",
+  "target": {"width": null, "height": null, "shape": null, "safe_margin": 4},
+  "identity": {"name_zh": null, "name_en": null, "product_code": null},
+  "languages": [], "themes": [], "units": [], "features": {},
+  "source_strategy": {}, "capability_modes": {},
+  "capabilities": {"requested": []}, "development": {"source": null, "supported": []},
+  "figma": {"file_key": null, "page_id": null, "section_id": null},
+  "scope": {"node_ids": [], "instance_ids": []},
+  "component_libraries": [], "text_families": [],
+  "confirmations": {"target": false, "source_strategy": false, "development": false, "write_scope": false}
+}

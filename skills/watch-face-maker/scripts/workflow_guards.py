@@ -9,6 +9,8 @@ import json
 import re
 from pathlib import Path
 
+from screen_geometry import screen_spec
+
 
 GATE_ORDER = ("intake", "reference", "prototype", "assembly", "visual_preflight")
 GATE_STATUSES = {"pending", "pass", "fail", "not_applicable"}
@@ -225,6 +227,13 @@ def gate_failures(contract: dict, requested_gate: str) -> list[str]:
         return [f"未知门禁：{requested_gate}"]
     failures: list[str] = []
     gates = contract["gates"]
+    try:
+        target = dict(contract["target"])
+        if target.get("shape") == "round_rect":
+            target["shape"] = "rounded_rect"
+        screen_spec(target)
+    except ValueError as exc:
+        failures.append("目标规格需要适配：" + str(exc))
 
     if contract.get("status") == "needs_stronger_model_or_human_asset":
         return ["降级路线仍失败，已停止正式制作，等待更强模型或人工素材"]
