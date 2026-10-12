@@ -14,6 +14,8 @@
 - 按目标规定尺寸的缩略图检查小尺寸可读性。
 - 检查文字、官方组件实例和关键图标是否被裁切。
 - 用户提出视觉修正后重新检查涉及区域及派生资源，不沿用这些区域的旧结论；已采用的纠错方案作为布局依据，保留原参考作为风格依据，不以像素相似度要求恢复原错误。
+- 新建或替换背景时，分别查看裸背景源、目标尺寸局部和整盘；核对参考图、采用素材与被替代素材的哈希和去向。旧标志、控件、凹槽、刻度及模糊残留必须从源像素移除，不能只在上方遮盖。
+- 草稿至少达到可评审状态，明显重叠、越界、素材污染或主要构图偏离仍判失败。报告分别标明草稿可评审、全量生产校验、用户验收和固件验证；自动检查与文件哈希不能替代后三者。
 
 ## 真实案例与行为评测
 
@@ -32,15 +34,17 @@
 
 ## 结构与资源
 
+- 规则圆形刻度按[圆形刻度检查](circular-ticks.md#制作后检查)回读实际布尔结构、共圆心、角度集合、线宽及内外半径，并核对最终可见数量和渲染。没有依据改用独立小矩形或扁平位图时不通过；此项未执行不得以通用校验器成功替代。
+
 - 数据字模先检查复用关系：同层级同字号同样式的数据不得按功能重复建立0–9母件；一档使用Num/Data，两档使用Num/Data/Large和Num/Data/Small。合并后检查实例引用、实际字符、字形位置、重复母件清除及新旧资源映射。需要保留的旧专用字模记录用户确认范围，不以资源减量为由改变未经确认的视觉层级。
 
-- 按 [背景合并与独立切图](background-composition.md) 检查源图层及实际导出，确认必须变化的内容没有固定进背景；普通连续进度底可以合入背景，异形进度与电量状态必须带底切出。背景内部的固定元素不要求另有独立切图。
+- 按 [背景合并与独立切图](background-composition.md) 检查源图层及实际导出，确认必须变化的内容没有固定进背景。进度按 `capability_modes` 核对：`native_continuous` 具有不导出PNG的可编辑原生示意和能力来源；`state_images` 的分段、异形或复杂材质状态保留完整底。不能仅凭“电量”名称强制一种模式。背景内部的固定元素不要求另有独立切图。
 - 本次有动画时，按 [动画切图](animation-assets.md) 检查全部帧的尺寸、顺序和导出，并复核完整播放；允许固定底随帧合成，实时数据仍须独立。未验证播放时不能声称动画交付通过。
 - 目标主画框 ID 和尺寸符合任务要求。
 - 功能模块布局容器应包住实际子内容，不能遗留无必要的整屏范围；空的旧布局容器应清理。收紧前后比较后代绝对坐标、尺寸与母件引用，并检查Active、主稿和等比缩略图同步。整屏背景、主稿及AOD不套用此收紧规则；布局容器不自动设置切图导出。
-- 动态字段都有对应状态族；极值和空/满状态可显示。
+- 使用 `state_images` 的动态字段都有对应状态族，极值和空/满状态可显示；原生连续控件不建立同名状态族。
 - 状态实际数量等于清单期望数量。
-- `weather`、`battery`、`bluetooth` 以及各进度资源分别作为有状态能力写入 `capabilities.requested`；校验时必须存在同名状态族。天气、电池和蓝牙分别按当前规范检查 48、11、2 个状态，进度资源按本次段数检查空状态到满状态。
+- `weather`、`battery`、`bluetooth` 及各进度能力写入 `capabilities.requested`；有多种实现方式的能力在 `capability_modes` 声明 `state_images` 或 `native_continuous`。天气和蓝牙仍分别检查48、2个状态；电池选择状态图时检查11态，选择原生连续模式时核对 `native_progress`，不得同时保留电池状态族。
 - 名称唯一，序列从 0 连续且无缺号；单图资源没有多余序号。
 - 新字段使用 PascalCase；同一项目统一使用完整字段、缩写字段或已记录的旧项目锁定模式。
 - `naming.unresolved_terms`、`mixed_paths`、`duplicate_abbreviations` 和 `non_pascal_case_fields` 均为空。
@@ -48,6 +52,7 @@
 - 参考图复刻逐区检查外圈厚度和刻度、面板轮廓和层级、渐变与阴影、数字与标签比例、图标实心/线性重量、留白和中心焦点；仅字段齐全或布局大致相同不能判定视觉通过。
 - 外圈数字沿圆周切线旋转时，要同时核对角度大小、左右镜像方向和可读朝向；仅角度绝对值相同仍可能与参考图反向。优先按圆心和固定半径定位每个数字的视觉中心，再检查 `60/30` 水平、`45/15` 竖向及其余四对斜向数字。
 - 切图资源区的实际节点类型必须为 `SECTION`，不能仅凭名称判断；单个切图保持组件。主表盘、AOD、缩略图及必要的标注画框不因这条规则改为分区。
+- 设置 `resource_board_layout: true` 后，检查该 `SECTION` 下全部直属可见节点零相交、零越界；范围包含不同资源族、标题、大预览及用户审核对照节点。状态数量和单族网格通过不能替代此检查。
 - 所有正式切图组件都有 PNG 导出设置，倍率和尺寸正确。
 - 位图背景的源图分辨率与导出倍率分开验证：Figma 原始填充应保留高分辨率源文件，回读像素尺寸并在可行时核对哈希；节点的 1× 导出设置不能作为上传低分辨率源图的理由。
 - 组件库图标在 Figma 源设计中保持实例关系，包括合入背景的固定图标；缺失图标使用纯色色块。引用正确后仍须按[设计合理性评审](design-rationality.md)对照母件实际画面的语义、状态和朝向，回读实例及父级的合成变换。`rotation=0` 不证明没有反射；负行列式也不直接证明方向错误。仅修正实际方向偏差，保留已确认镜像与方向表达，不统一归零。
@@ -57,31 +62,42 @@
 - 逐个文字组件检查宽高都能被 4 整除；同一资源族的高度只有一个值。
 - 按原生TEXT识别所有文字切图，覆盖数字、同组符号单位、星期、月份和标签；不能仅按Num路径或0–9字符筛选。检查文本框宽高为正偶数整数、X/Y最多一位小数、完整字形无切边，字号和字形尺寸未改变。数字、词语和单位核对可见字形中心；单字符标点核对水平中心，垂直位置另对照数字基线或已确认的符号排版。中心偏差每轴不超过0.05px，另容许0.001px浮点尾差。必须回读原始节点，所有内部TEXT的textAlignHorizontal必须为CENTER（水平居中），不得使用LEFT/RIGHT/JUSTIFIED；属性缺失为未验证。居中属性和实际字形几何须同时满足，设置CENTER或格式化显示不能替代边界、基线与位置检查。复核星期/月与日期的基线、Active/AOD及派生实例。
 - 调整多字符文本框时，先完成尺寸修改，再按未被裁切的完整字形重新定位；不能拿父框已裁过的absoluteRenderBounds计算中心。测量临时关闭裁切时，完成后恢复原裁切设置。
-- 数据类和日期类只检查 `0–9` 数字在各自资源族内宽高一致；标点、符号和单位不得被数字的统一宽度规则扩大。
+- 秒数、数据类和日期类只检查 `0–9` 数字在各自资源族内宽高一致；标点、符号和单位不得被数字的统一宽度规则扩大。主时间 Hour、Minute 及 AOD 配对的变宽规则不能按路径中的 `Num`、`Time` 或泛称“时间数字”扩展到秒数。
 - 另按[数值内部字距与字段分组](design-rationality.md#数值内部字距与字段分组)检查实际展示组：同一数值的数字切图组必须为横向自动布局、紧凑排列、`itemSpacing = 0`，数字实例参与布局；核对相邻实例边框实际相接，不能只检查零间距属性而漏掉分散对齐、间隔节点或额外包装留白。字段之间另设间距，字形自身透明留白不算实例间距。日期覆盖如11、18、28、31及实际支持的一/两位日、星期/月切换；其他数值按其真实值域取样。核对字符不相碰、数值与单位归属清楚和整体锚点稳定；结构通过不替代阅读检查。用户已手动修正时保留当前排布，不能为执行此规则重新覆盖。
-- 数据类和日期类还要检查统一宽度等于 `0–9` 中最大 `absoluteRenderBounds.width` 加左右安全余量后向上取整得到的最小 4 倍数；即使全族等宽，只要还能安全缩小 4 px 就判定失败。
-- 用实际渲染边界检查文字四边无切边；时间数字、标点、符号和单位的宽度必须是包含安全余量后的最小 4 倍数，标点保留所属资源族的统一高度和字体基线。
-- 已实现能力必须全部来自本次请求；`capabilities.unrequested_generated` 和 `excluded_generated` 均为空。配置文档第 5、6、9 点不进入默认交付。
+- 秒数、数据类和日期类还要检查统一宽度等于 `0–9` 中最大 `absoluteRenderBounds.width` 加左右安全余量后向上取整得到的最小 4 倍数；即使全族等宽，只要还能安全缩小 4 px 就判定失败。
+- 用实际渲染边界检查文字四边无切边；主时间数字、标点、符号和单位的变宽切图必须是包含安全余量后的最小 4 倍数，标点保留所属资源族的统一高度和字体基线。
+- 已实现能力必须全部来自本次请求；`capabilities.unrequested_generated` 和 `excluded_generated` 均为空。用户明确排除的能力不进入默认交付。
 - `capabilities.outside_boundary_requested` 和 `outside_boundary_generated` 均为空，证明设计没有把开发文档未支持的效果直接作为交付项。
 
 ## 校验清单文件
 
-`scripts/validate_manifest.py` 接受 JSON 文件。关键字段包括：
+`scripts/validate_manifest.py` 接受 JSON 文件。下方 480×480 仅为字段示例；实际 `canvas` 必须填写用户本次确认的目标尺寸与对应屏形参数。关键字段包括：
 
 ```json
 {
+  "name_zh": "示例表盘",
+  "name_en": "Sample Face",
+  "product_code": "00001",
   "prefix": "SampleFace",
+  "source_strategy": {
+    "mode": "new",
+    "reference_image_hashes": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+    "adopted_image_hashes": ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+    "reused_image_hashes": []
+  },
   "canvas": {"width": 480, "height": 480, "safe_margin": 4},
   "languages": ["EN"],
   "themes": ["Default"],
   "features": {"color_variants": false, "special_date": false},
   "aod": {"required": true, "lit_ratio": 0.02, "export_scale": 1},
   "exports": {"active_scale": 5, "asset_scale": 1, "preview": [256, 256]},
-  "states": {"weather": {"expected": 48, "actual": 48}},
+  "states": {},
+  "capability_modes": {"battery": "native_continuous"},
   "components": {"total": 1, "duplicates": [], "missing_png_export": []},
   "naming": {
     "mode": "full",
     "schema_status": "confirmed",
+    "spec_source": "figma-v3.0:1910:298",
     "mixed_paths": [],
     "non_pascal_case_fields": [],
     "duplicate_abbreviations": [],
@@ -90,8 +106,8 @@
     "static_resources_with_sequence": []
   },
   "capabilities": {
-    "requested": ["time", "aod"],
-    "implemented": ["time", "aod"],
+    "requested": ["time", "battery", "aod"],
+    "implemented": ["time", "battery", "aod"],
     "unrequested_generated": [],
     "excluded_generated": [],
     "outside_boundary_requested": [],
@@ -131,4 +147,4 @@
 
 ## 多尺寸任务
 
-多尺寸适配时按[多尺寸适配](multi-size.md)的目标规格、同名资源作用范围、共享采集和批次证据执行。单尺寸480兼容入口保留；不把480尺寸、圆形掩模或256缩略图固定应用到其他目标。
+多尺寸适配时按[多尺寸适配](multi-size.md)的目标规格、同名资源作用范围、共享采集和批次证据执行。旧 480 项目继续按已记录规格兼容；新任务必须先确认目标尺寸与屏形，不把 480 尺寸、圆形掩模或 256 缩略图作为默认值应用到其他目标。

@@ -29,6 +29,77 @@ def close(a,b):
     return len(a)==len(b) and all(math.isfinite(x) and math.isfinite(y) and abs(x-y)<=.001 for x,y in zip(a,b))
 
 
+def node_box(n):
+    try:
+        w,h=n['width'],n['height'];t=n.get('absolute_transform') or n.get('relative_transform')
+        if not all(isinstance(v,(int,float)) and not isinstance(v,bool) and math.isfinite(v) for v in (w,h)) or w<=0 or h<=0:
+            return None
+        if t:
+            points=[[t[r][0]*x+t[r][1]*y+t[r][2] for r in range(2)] for x,y in ((0,0),(w,0),(0,h),(w,h))]
+            xs=[p[0] for p in points];ys=[p[1] for p in points]
+            return min(xs),min(ys),max(xs),max(ys)
+        x,y=n['x'],n['y']
+        return x,y,x+w,y+h
+    except (KeyError,TypeError,ValueError,IndexError):
+        return None
+
+
+def resource_board_layout(s,nodes):
+    errors,unknown=[],[];root_id=s.get('config',{}).get('asset_board_id');root=nodes.get(root_id)
+    if s.get('resource_board_layout') is not True:
+        return check('resource_board_layout',errors,['未声明全资源分区排布检查'],'检查资源分区直属可见节点的跨族碰撞与越界')
+    if not root:
+        return check('resource_board_layout',errors,[str(root_id or '缺少asset_board_id')],'检查资源分区直属可见节点的跨族碰撞与越界')
+    root_box=node_box(root)
+    if not root_box:unknown.append(root_id+':分区边界无效')
+    members=[]
+    for n in nodes.values():
+        if n.get('parent_id')!=root_id or n.get('type')=='SLICE' or n.get('visible') is False or n.get('opacity',1)<=0:
+            continue
+        box=node_box(n)
+        if not box:unknown.append(n['id']+':边界无效');continue
+        members.append((n,box))
+        if root_box and (box[0]<root_box[0]-.001 or box[1]<root_box[1]-.001 or box[2]>root_box[2]+.001 or box[3]>root_box[3]+.001):
+            errors.append(n['id']+':超出资源分区')
+    if not members:unknown.append(root_id+':没有可检查的直属可见节点')
+    for i,(a,ab) in enumerate(members):
+        for b,bb in members[i+1:]:
+            if min(ab[2],bb[2])-max(ab[0],bb[0])>.001 and min(ab[3],bb[3])-max(ab[1],bb[1])>.001:
+                errors.append(a['id']+'↔'+b['id']+':直属资源相交')
+    return check('resource_board_layout',sorted(set(errors)),sorted(set(unknown)),f'检查资源分区 {len(members)} 个直属可见节点，覆盖母件、标题、预览与用户保留对照节点')
+
+
+def native_progress(s,nodes,capability_modes=None):
+    errors,unknown=[],[];entries=s.get('native_progress',[]);source_only=set(s.get('source_only_node_ids',[]))
+    if isinstance(capability_modes,dict) and not entries and all(mode=='state_images' for mode in capability_modes.values()):
+        return dict(id='snapshot.native_progress',status='not_applicable',explanation='已声明未使用原生连续进度',locations=[])
+    if not entries:return check('native_progress',errors,['缺少原生连续进度映射'],'核对原生连续进度示意母件、可编辑几何及非PNG交付属性')
+    if not isinstance(entries,list):return check('native_progress',['native_progress必须是数组'],unknown,'核对原生连续进度示意母件、可编辑几何及非PNG交付属性')
+    seen=set()
+    for entry in entries:
+        if not isinstance(entry,dict):errors.append(str(entry));continue
+        capability=entry.get('capability');id=entry.get('node_id');shape=entry.get('shape');n=nodes.get(id)
+        if not isinstance(capability,str) or capability in seen:errors.append(str(capability)+':能力重复或缺失')
+        else:seen.add(capability)
+        if not n or n.get('type')!='COMPONENT':errors.append(str(id)+':示意母件缺失');continue
+        if visible(n,s.get('config',{}).get('asset_board_id'),nodes) is not True:errors.append(id+':示意母件不可见或不在资源分区')
+        if id not in source_only or n.get('export_settings'):errors.append(id+':原生示意不得作为PNG导出')
+        descendants=[];stack=[id]
+        while stack:
+            parent=stack.pop()
+            children=[child for child in nodes.values() if child.get('parent_id')==parent]
+            descendants.extend(children);stack.extend(child['id'] for child in children)
+        if shape=='arc':
+            arcs=[child for child in descendants if child.get('type')=='ELLIPSE' and isinstance(child.get('arcData'),dict)]
+            if not arcs:errors.append(id+':缺少可编辑圆弧几何')
+        elif shape=='linear':
+            geometry=[child for child in descendants if child.get('type') in {'RECTANGLE','FRAME'} and node_box(child)]
+            if not geometry:errors.append(id+':缺少可编辑线性几何')
+        else:errors.append(id+':shape必须为arc或linear')
+        if not isinstance(entry.get('framework_capability_source'),str) or not entry.get('framework_capability_source').strip():unknown.append(id+':缺少框架能力来源')
+    return check('native_progress',sorted(set(errors)),sorted(set(unknown)),'核对原生连续进度示意母件、可编辑几何及非PNG交付属性；不代表固件接入或真机通过')
+
+
 def basis(t):
     """保留旋转/反射，排除父画布平移与实例尺寸造成的缩放。"""
     lengths=[math.hypot(t[0][c],t[1][c]) for c in range(2)]
@@ -88,6 +159,8 @@ def state_layout(s,nodes):
 def pointer_annotations(s,nodes):
     errors,unknown=[],[]
     pointers=s.get('pointers',[])
+    if not pointers and s.get('face_type')=='digital':
+        return dict(id='snapshot.pointer_annotations',status='not_applicable',explanation='数字表盘未使用指针',locations=[])
     if not pointers:unknown.append('缺少指针及标注对应关系')
     for p in pointers:
         role=p.get('role','指针');a=p.get('annotation')
@@ -149,6 +222,6 @@ def resource_ownership(s,nodes):
     return check('resource_ownership',errors,unknown,'交叉核对已确认逐元素行为、背景源实例、展示引用、source_only与正式导出；不按模块动态性推断图标')
 
 
-def validate_delivery_guards(snapshot):
+def validate_delivery_guards(snapshot,capability_modes=None):
     nodes={n['id']:n for n in snapshot.get('nodes',[])}
-    return [fn(snapshot,nodes) for fn in (icon_orientation,state_layout,pointer_annotations,resource_ownership)]
+    return [fn(snapshot,nodes) for fn in (icon_orientation,state_layout,pointer_annotations,resource_ownership,resource_board_layout)] + [native_progress(snapshot,nodes,capability_modes)]

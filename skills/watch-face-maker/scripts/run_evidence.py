@@ -1,7 +1,6 @@
 """绑定同轮需求、快照和实际文件；保存可恢复断点及改稿影响范围。"""
 import hashlib
 import json
-import struct
 from copy import deepcopy
 from pathlib import Path
 from uuid import uuid4
@@ -86,6 +85,22 @@ def safe_path(directory, relative):
     return path
 
 
+def png_dimensions(path):
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise ValueError('需要 Pillow 才能验证PNG完整性') from exc
+    try:
+        with Image.open(path) as image:
+            if image.format != 'PNG':
+                raise ValueError('实际文件不是PNG')
+            dimensions = list(image.size)
+            image.verify()
+        return dimensions
+    except (OSError, SyntaxError, ValueError) as exc:
+        raise ValueError('实际PNG不完整或无法解析') from exc
+
+
 def record_export(run, snapshot, node_id, relative, directory, setting, before_signature, after_signature):
     if run['status'] != 'active' or digest(snapshot) != run['snapshot_sha256']:
         raise ValueError('轮次停止或快照改变，不能沿用导出记录')
@@ -94,15 +109,13 @@ def record_export(run, snapshot, node_id, relative, directory, setting, before_s
     node = next(n for n in snapshot['nodes'] if n['id'] == node_id)
     if setting not in node.get('export_settings', []):
         raise ValueError('实际导出设置不属于该节点')
-    header = safe_path(directory, relative).read_bytes()[:24]
-    if len(header) != 24 or header[:8] != b'\x89PNG\r\n\x1a\n':
-        raise ValueError('实际文件不是PNG')
-    dimensions = list(struct.unpack('>II', header[16:24]))
+    path = safe_path(directory, relative)
+    dimensions = png_dimensions(path)
     receipt = {'dimensions': dimensions, 'node_id': node_id, 'path': relative, 'setting': setting,
                'run_id': run['run_id'], 'snapshot_sha256': run['snapshot_sha256'],
                'source_before': before_signature, 'source_after': after_signature,
                'resource_sha256': resource_fingerprint(snapshot, node_id),
-               'sha256': file_hash(safe_path(directory, relative)), 'status': 'verified'}
+               'sha256': file_hash(path), 'status': 'verified'}
     run['files'] = [r for r in run['files'] if r['path'] != relative] + [receipt]
     return receipt
 
@@ -144,7 +157,9 @@ def validate_run(run, requirements, snapshot, directory):
         if not reuse_proof_valid(r, snapshot):
             errors.append(f'跨版本复用证据不匹配：{r["path"]}')
         try:
-            if r.get('status') != 'verified' or file_hash(safe_path(directory, r['path'])) != r['sha256']:
+            path = safe_path(directory, r['path'])
+            if (r.get('status') != 'verified' or file_hash(path) != r['sha256']
+                    or png_dimensions(path) != r.get('dimensions')):
                 errors.append(f'文件已变化或不能复用：{r["path"]}')
         except (OSError, ValueError):
             errors.append(f'文件不存在或路径无效：{r["path"]}')
@@ -164,7 +179,8 @@ def reusable_files(run, requirements, snapshot, directory):
                     and receipt.get('source_before') == receipt.get('source_after') == snapshot.get('capture_signature')
                     and reuse_proof_valid(receipt, snapshot)
                     and any(n['id'] == receipt['node_id'] and receipt.get('setting') in n.get('export_settings', []) for n in snapshot['nodes'])
-                    and file_hash(safe_path(directory, receipt['path'])) == receipt['sha256']):
+                    and file_hash(safe_path(directory, receipt['path'])) == receipt['sha256']
+                    and png_dimensions(safe_path(directory, receipt['path'])) == receipt.get('dimensions')):
                 reusable.append(receipt['path'])
         except (OSError, ValueError):
             pass

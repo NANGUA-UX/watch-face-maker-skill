@@ -10,18 +10,22 @@
 
 ## Figma 快照采集
 
+清单的 `source_strategy` 记录图片素材来源：`mode` 为 `new|modify|reuse_allowed|reuse_forbidden`，并分别填写 `reference_image_hashes`、`adopted_image_hashes`、`reused_image_hashes`。哈希使用实际文件SHA-256或Figma读取到的40位图片哈希；`new` 与 `reuse_forbidden` 的复用数组必须为空。此字段约束图片素材，不把指定组件库实例误报为旧背景复用。
+
 在 `use_figma` 的只读 JavaScript 上下文调用 `await collectSnapshot(config)`。`config` 必须包含 `file_key`、`section_id`、`asset_board_id`、`main_id`、`active_id`、`aod_id`、`preview_id`；可用 `offset` 和 `limit` 分页，`limit` 默认为 20。每页返回 `page: {offset, limit, count}`、`total_nodes` 和 `next_offset`。节点过多时可设 `skip_instance_children: true`，此时仍记录实例本身和母件引用，报告会把深层可见叶子组装标为未验证。
 
-合并契约：所有页必须具有相同 `total_nodes`、`capture_signature` 和遍历选项，`page.offset` 从 0 按 `page.count` 无缝连续，末页 `next_offset` 为 `null`。采集器每页计算整组几何签名，即使节点数量相同，也能识别字体、位置或导出设置变化。使用 `scripts/merge_snapshot_pages.py PAGES.json SNAPSHOT.json` 合并按顺序保存的分页数组；签名变化、缺页或重复ID时停止，不写伪完整结果。不能通过重新填写总数或去重来掩盖版本混合。导出完成后再核对签名；变化时重新采集和验证受影响产物。合并后添加 `export_items: [{"node_id":"...", "path":"SampleFace/...png", "role":"asset|presentation_main|aod_full"}]`，路径从当前节点名称生成。
+合并契约：所有页必须具有相同 `total_nodes`、`capture_signature` 和遍历选项，`page.offset` 从 0 按 `page.count` 无缝连续，末页 `next_offset` 为 `null`。采集器每页计算整组几何签名，即使节点数量相同，也能识别字体、位置或导出设置变化。使用 `scripts/merge_snapshot_pages.py PAGES.json SNAPSHOT.json` 合并按顺序保存的分页数组；签名变化、缺页或重复ID时停止，不写伪完整结果。不能通过重新填写总数或去重来掩盖版本混合。导出完成后再核对签名；变化时重新采集和验证受影响产物。合并后添加 `export_items: [{"node_id":"...", "path":"Dial1/...png", "role":"asset|presentation_main|aod_full"}]`，路径从当前节点名称生成。
 
 采集器只遍历指定 section，不加载字体，不写节点，不发网络请求。`glyph_bounds` 是 Figma `absoluteRenderBounds` 的记录，不是 PNG alpha bounds。若字形的祖先被裁切，必须从临时无裁切测量源补入 `unclipped_glyph_bounds`，否则对应尺寸检查为 `unverified`。分页合并后可人工补充：
 
 - `roles: {"time_main_id": "...", "time_aod_id": "..."}`
 - `aod_style: {"node_name_prefix": "Dial1/Num/Time-Dark/", "stroke_color": "#B3B3B3"}`：采集 TEXT 的 `fills`、`strokes`、`stroke_weight`、`stroke_align`；同时检查数字0–9及时间分隔符的母件与 AOD 实际显示文字，无填充、规定灰色且描边至少2px。按每个目标原生尺寸采集缩放后的实际样式，不能只检查缩放前母件；加粗后另验完整渲染边界与PNG。旧快照缺少样式字段时为未验证，不能仅凭 Time-Dark 名称推定是描边。
-- `shared_data_policy: {"prefix": "SampleFace", "preserved_families": []}`：按实际母件字符、字号和样式核对共享数据族；单档使用Data，双档使用Large/Small且字号严格递减。`preserved_families`仅记录用户明确暂不调整的旧专用字模，须在项目需求中解释，不作为新项目默认排除名单。
-- `resource_families: [{"name": "...", "kind": "time|data|date|unit|symbol", "node_ids": ["..."]}]`
+- `shared_data_policy: {"prefix": "Dial1", "preserved_families": []}`：按实际母件字符、字号和样式核对共享数据族；单档使用Data，双档使用Large/Small且字号严格递减。`preserved_families`仅记录用户明确暂不调整的旧专用字模，须在项目需求中解释，不作为新项目默认排除名单。
+- `resource_families: [{"name": "...", "kind": "time|second|data|date|unit|symbol", "node_ids": ["..."]}]`；`time` 只用于主时间 Hour、Minute 及 AOD 配对的变宽字符，`second` 的 `0–9` 按同族统一宽高检查。
 - 同一共享数据族的`node_ids`必须包含对应符号和单位；`shared_data_policy.symbol_resources`记录`node_id`、实际`character`与目标`path`，检查遗漏改名或漏纳入统一高度的资源。`vertical_padding`默认0，按完整字形确定最小高度；旧族确需保留额外上下余量时显式记录该值与项目理由。
-- `state_families: [{"name": "weather", "node_name_prefix": "SampleFace/Weather/", "expected_count": 48, "start_index": 0, "index_width": 3}]`
+- `state_families: [{"name": "weather", "node_name_prefix": "Dial1/Weather/", "expected_count": 48, "start_index": 0, "index_width": 3}]`
+- `native_progress: [{"capability":"battery", "node_id":"...", "shape":"arc|linear", "framework_capability_source":"..."}]`：仅用于清单 `capability_modes` 已选择 `native_continuous` 的能力。`node_id` 指向资源分区内不导出PNG的可编辑示意母件，并列入 `source_only_node_ids`；圆弧须保留实际 `arcData`。此证据不证明固件接入或真机运行。
+- `resource_board_layout: true`：要求检查 `asset_board_id` 分区下全部直属可见节点的相交与越界，包含跨资源族母件、标题、大预览和用户保留对照节点。未声明时为未验证，不能用各状态族内部排列通过代替。
 - `animations: [{"node_ids": ["..."], "expected_count": 10, "start_index": 0}]`
 
 `source_only_node_ids` 记录已合入背景或作为旧版对照保留、不再交付的母件，项目中逐项注明原因。它们必须仍在资产板上并关闭PNG导出；从正式导出映射及对应文字资源族中移除，并清理导出目录里的旧独立 PNG。不能因为展示稿未引用某个合法状态就将其排除。描边后的字形渲染边界也必须完整，不能继续沿用实心字的旧测量。
@@ -49,7 +53,7 @@ uv run --with pillow python "<SKILL_DIR>/scripts/validate_manifest.py" MANIFEST.
 - `vector_artwork_roots: [{"node_id":"...", "source":"用户确认的图标来源"}]`：仅用于保留原有矢量图标内部造型。根节点必须是FRAME、说明来源且后代不含TEXT；根本身仍检查整数位置，内部路径不强制取整。不得把功能布局、整个表盘或文字资源列入此项以绕过检查。背景内刻度文字属于整幅图案，独立文字切图则按纯TEXT/FRAME/GROUP母件识别。
 - `digit_geometry: true`：保留旧版0–9数字专项检查，不能替代整组文字检查。
 - `text_geometry: true`：当前制作必设。按原生TEXT识别完整文字切图，检查文本框宽高为正偶数整数、X/Y最多一位小数、实际字形无切边和居中（每轴0.05px取整偏差，另容许0.001px尾差）；包括符号单位、星期月份和标签。单字符标点仅自动检查水平中心，其垂直基线另附原始节点对应证据。缺少此声明或测量不足时为未验证。母件宽高4倍数规则不变。
-- `progress_resources: [{"prefix":"SampleFace/Progress/Pace/","shape":"irregular","include_track":true,"segment_count":8,"static_track_name":"Static/Progress/Pace/Track"}]`：当前分段进度检查读取原始VECTOR、visible、opacity、fills；确认所有状态保留完整分段并移除背景中重复的旧底。形态允许regular/irregular/battery；此分段计数检查仅用于声明了segment_count的序列，连续电量外壳按其实际结构核对。真实PNG再比较轮廓及亮起段，不能仅凭include_track自报。
+- `progress_resources: [{"prefix":"Dial1/Progress/Pace/","shape":"irregular","include_track":true,"segment_count":8,"static_track_name":"Static/Progress/Pace/Track"}]`：仅记录 `state_images` 进度，检查读取原始VECTOR、visible、opacity、fills；确认所有状态保留完整分段并移除背景中重复的旧底。形态允许 `regular`、`irregular`、`segmented`，不能把 `battery` 等业务名写成几何类型；此分段计数检查仅用于声明了 `segment_count` 的序列。真实PNG再比较轮廓及亮起段，不能仅凭 `include_track` 自报。
 
 ## 同轮来源绑定与断点（v2）
 
@@ -121,11 +125,11 @@ checkpoint("review/next-run.json", next_run)
 
 若主体快照跳过实例子树，可以用同轮Figma只读遍历补充`composition_proof`：`capture_signature`必须与该快照一致，`roots`逐一覆盖主稿、AOD和预览，记录`root_id`、实际遍历数`visited`及每个可见叶子的`id/type/instance_id/master_id`。必须真的展开实例遍历；不以手填零违规数代替叶子记录。此证据只补足实例组装检查，不代替内部样式、几何或真机行为检查。
 
-纯数据指针进度使用`progress_representation: "pointers"`，同时提供实际`pointers`映射；进度条带底检查为不适用，指针轴心/扫过范围仍必须验证。
+纯数据指针进度使用`progress_representation: "pointers"`，同时提供实际`pointers`映射；进度条带底检查为不适用，指针轴心/扫过范围仍必须验证。原生圆弧或线性进度使用上述 `native_progress`，不再伪造状态图资源；清单与快照由 `snapshot.capability_binding` 交叉核对。
 
 ## 多尺寸任务
 
-多尺寸适配时按[多尺寸适配](multi-size.md)的目标规格、同名资源作用范围、共享采集和批次证据执行。单尺寸480兼容入口保留；不把480尺寸、圆形掩模或256缩略图固定应用到其他目标。
+多尺寸适配时按[多尺寸适配](multi-size.md)的目标规格、同名资源作用范围、共享采集和批次证据执行。旧 480 项目继续按已记录规格兼容；新任务必须先确认目标尺寸与屏形，不把 480 尺寸、圆形掩模或 256 缩略图作为默认值应用到其他目标。
 
 
 ## 制作交叉检查
@@ -136,5 +140,7 @@ checkpoint("review/next-run.json", next_run)
 - `state_families[].layout: {parent_id, origin:[x,y], step:[dx,dy], columns}`：原点和步长来自当前已确认资源行或网格，按序号行优先填槽。检查原母件的实际X/Y、父分区、显隐与相互覆盖；数量、序号连续性、显示引用和PNG非空仍分别验证。用户重新排列时先更新排布基准，不回放最初坐标。非网格排布不填写虚假网格，保留未验证并人工检查。
 - `pointers[].annotation: {frame_id, instance_id, pivot_node_id, line_node_id, offset?:[x,y]}`：ID分别指向不导出的标注画框、零位指针实例、轴心点、垂直尺寸红线。读取实际原始变换计算 `center + offset - pivot`、轴心点中心、红线两端；不根据标签文本判定。并排AOD有显示偏移时明确记录 `offset`，每个配对分别映射。主盘和偏心小盘均用自身轴心；此检查不改变用户要求的整屏旋转框尺寸。
 - `resource_ownership: [{master_id, behavior:"static|dynamic", destination:"background|independent", reason, independent_behavior?}]` 与 `config.background_id`：沿用已确认的逐元素拆分决定，不从节点名称推断功能。背景归属应有背景源实例、关闭独立导出并纳入已有 `source_only_node_ids`；Active/AOD不再重复组装同一固定图标。独立资源仍有正式导出，不能同时固定在背景中。静态资源确有独立行为时在 `independent_behavior` 记录具体依据，不强制合并。已烘焙且不再保留源实例的背景需另验合成像素，自动检查不得仅凭自填说明通过。
+- `resource_board_layout: true`：跨族检查整个资源分区的直属可见节点，不只检查 `state_families[].layout` 内部。相交或越界失败；检查包括用户新增审核对照，但修复不得擅自删除该节点。
+- `native_progress`：核对示意母件位于资源分区、保持可编辑圆弧/线性几何、关闭PNG导出且列入 `source_only_node_ids`。清单中的 `capability_modes` 决定是否应存在该映射；设计通过与固件/真机验证仍为不同状态。
 
-新建实例、排列状态、生成标注、装配背景之后分别运行相关检查；正式导出前统一复核。修改只针对不符的原节点，重复执行应无新增或重复翻转；对用户维护区域先读取当前结构。旧的全量建盘脚本不得用于回放修复。原始节点检查、库图标实际渲染对照、合成前后像素对比、用户视觉确认与设备接入保持独立记录。
+新建实例、排列状态、生成标注、装配背景之后分别运行相关检查；正式导出前统一复核。修改只针对不符的原节点，重复执行应无新增或重复翻转；对用户维护区域先读取当前结构。旧的全量建盘脚本不得用于回放修复。原始节点检查、库图标实际渲染对照、裸背景源/局部/整盘视觉、用户视觉确认与设备接入保持独立记录。草稿可评审、全量生产校验、用户验收和固件验证分别报告；修正后受影响范围的旧快照、清单和报告只能作为历史记录，不能继续支撑当前通过结论。

@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "status": "in_progress",
+  "task_mode": "original",
+  "complexity": "template",
+  "target": {
+    "width": 1,
+    "height": 1,
+    "shape": "circle"
+  },
+  "source_strategy": {
+    "mode": "new",
+    "reuse_permission_confirmed": false
+  },
+  "reference_contract": {
+    "reference_hashes": [],
+    "invariants": [],
+    "allowed_changes": [],
+    "forbidden_content": []
+  },
+  "production_routes": [],
+  "gates": {
+    "intake": "pending",
+    "reference": "pending",
+    "prototype": "pending",
+    "assembly": "pending",
+    "visual_preflight": "pending"
+  },
+  "attempts": []
+}

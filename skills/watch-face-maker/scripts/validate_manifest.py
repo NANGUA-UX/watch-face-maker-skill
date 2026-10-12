@@ -12,10 +12,12 @@ from delivery_guards import validate_delivery_guards
 import re
 import sys
 from pathlib import Path
-from naming import validate_names
-from run_evidence import stable_snapshot, validate_run
+from naming import format_prefix, validate_legacy_names, validate_names
+from run_evidence import safe_path, stable_snapshot, validate_run
 from pointer_checks import validate_pointers, validate_aod_pointers
 from screen_geometry import screen_spec, contains, fit_preview
+from workflow_guards import file_sha256, gate_failures, load_contract
+from visual_artifacts import comparison_images
 
 
 STANDARD_STATE_COUNTS = {"weather": 48, "battery": 11, "bluetooth": 2}
@@ -26,6 +28,9 @@ STATE_CAPABILITY_TO_FAMILY = {
     "pace_progress": "pace_progress",
     "calories_progress": "calories_progress",
     "distance_progress": "distance_progress",
+}
+NATIVE_PROGRESS_CAPABILITIES = {
+    "battery", "pace_progress", "calories_progress", "distance_progress",
 }
 
 
@@ -41,18 +46,54 @@ def is_finite_number(value: object) -> bool:
     )
 
 
+def valid_image_hash(value: object) -> bool:
+    return isinstance(value, str) and bool(re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", value))
+
+
 def validate_manifest(data: dict) -> tuple[list[str], dict]:
     errors: list[str] = []
 
+    naming_data = data.get("naming")
+    naming_mode = naming_data.get("mode") if isinstance(naming_data, dict) else None
     prefix = data.get("prefix")
     if not isinstance(prefix, str) or not prefix.strip():
         errors.append("prefix 必须是非空字符串")
-    elif not re.fullmatch(r"[A-Za-z0-9]+(?: [A-Za-z0-9]+)*", prefix):
-        errors.append("prefix 仅支持英文、数字及单个内部空格")
-    if "name_zh" in data or "name_en" in data:
-        errors.extend(validate_names(data.get("name_zh"), data.get("name_en")))
-        if prefix != data.get("name_en"):
-            errors.append("prefix 必须等于完整 name_en，保留空格")
+    elif naming_mode == "legacy":
+        if not re.fullmatch(r"[A-Za-z0-9]+(?: [A-Za-z0-9]+)*", prefix):
+            errors.append("legacy prefix 仅支持英文、数字及单个内部空格")
+    elif not re.fullmatch(r"[A-Z][A-Za-z0-9]*", prefix):
+        errors.append("新项目 prefix 须由表盘英文名去掉空格后连写，不能含空格或下划线")
+    if naming_mode in {"full", "short"} or "name_zh" in data or "name_en" in data:
+        if naming_mode == "legacy":
+            errors.extend(validate_legacy_names(data.get("name_zh"), data.get("name_en")))
+        else:
+            errors.extend(validate_names(
+                data.get("name_zh"), data.get("name_en"), data.get("product_code"),
+                require_code=True,
+            ))
+        expected_prefix = data.get("name_en") if naming_mode == "legacy" else (
+            format_prefix(data.get("name_en")) if isinstance(data.get("name_en"), str) else None
+        )
+        if prefix != expected_prefix:
+            errors.append("prefix 必须等于 name_en 去掉空格后的连写值")
+
+    source_strategy = data.get("source_strategy")
+    if source_strategy is not None:
+        if not isinstance(source_strategy, dict):
+            errors.append("source_strategy 必须是对象")
+        else:
+            mode = source_strategy.get("mode")
+            if mode not in {"new", "modify", "reuse_allowed", "reuse_forbidden"}:
+                errors.append("source_strategy.mode 必须是 new、modify、reuse_allowed 或 reuse_forbidden")
+            for field in ("reference_image_hashes", "adopted_image_hashes", "reused_image_hashes"):
+                values = source_strategy.get(field)
+                if not isinstance(values, list) or any(not valid_image_hash(value) for value in values):
+                    errors.append(f"source_strategy.{field} 必须是40或64位十六进制哈希数组")
+                elif len(set(values)) != len(values):
+                    errors.append(f"source_strategy.{field} 不能包含重复项")
+            reused = source_strategy.get("reused_image_hashes")
+            if mode in {"new", "reuse_forbidden"} and isinstance(reused, list) and reused:
+                errors.append(f"source_strategy.mode={mode} 时不能复用旧图片哈希")
 
     languages = data.get("languages", ["EN"])
     if not isinstance(languages, list) or not languages:
@@ -165,8 +206,8 @@ def validate_manifest(data: dict) -> tuple[list[str], dict]:
         errors.append(f"缩略图尺寸必须为 {spec['preview'][0]}×{spec['preview'][1]}")
 
     states = data.get("states", {})
-    if not isinstance(states, dict) or not states:
-        errors.append("states 必须包含至少一个动态状态族")
+    if not isinstance(states, dict):
+        errors.append("states 必须是对象；没有状态图资源时使用空对象")
         states = {}
     else:
         for name, counts in states.items():
@@ -245,6 +286,8 @@ def validate_manifest(data: dict) -> tuple[list[str], dict]:
             errors.append("legacy 命名模式必须标记为 legacy_locked")
         if mode in {"full", "short"} and schema_status != "confirmed":
             errors.append("新命名模式必须在字段映射确认后标记为 confirmed")
+        if mode in {"full", "short"} and naming.get("spec_source") != "figma-v3.0:1910:298":
+            errors.append("新命名模式必须记录 naming.spec_source=figma-v3.0:1910:298")
         for field, label in (
             ("mixed_paths", "同一项目不能混用完整字段与缩写路径"),
             ("non_pascal_case_fields", "新开发字段必须使用 PascalCase"),
@@ -297,9 +340,25 @@ def validate_manifest(data: dict) -> tuple[list[str], dict]:
             elif value:
                 errors.append(f"{label}：{', '.join(map(str, value))}")
 
+        capability_modes = data.get("capability_modes", {})
+        if not isinstance(capability_modes, dict):
+            errors.append("capability_modes 必须是对象")
+            capability_modes = {}
+        for capability, mode in capability_modes.items():
+            if capability not in requested:
+                errors.append(f"capability_modes 声明了未请求能力：{capability}")
+            if mode not in {"state_images", "native_continuous"}:
+                errors.append(f"{capability} 的实现模式必须是 state_images 或 native_continuous")
+            elif mode == "native_continuous" and capability not in NATIVE_PROGRESS_CAPABILITIES:
+                errors.append(f"{capability} 不支持 native_continuous 实现模式")
         for capability, state_family in STATE_CAPABILITY_TO_FAMILY.items():
-            if capability in requested and state_family not in states:
+            if capability not in requested:
+                continue
+            mode = capability_modes.get(capability, "state_images")
+            if mode == "state_images" and state_family not in states:
                 errors.append(f"已请求 {capability}，但缺少 {state_family} 状态族")
+            elif mode == "native_continuous" and state_family in states:
+                errors.append(f"{capability} 已使用 native_continuous，不能同时生成 {state_family} 状态族")
 
     composition = data.get("composition")
     if not isinstance(composition, dict):
@@ -408,6 +467,21 @@ def rounded_multiple_of_four(value: float) -> int:
     return int(math.ceil(value / 4) * 4)
 
 
+def has_digital_time(snapshot: dict) -> bool:
+    style = snapshot.get("aod_style", {})
+    roles = snapshot.get("roles", {})
+    return (
+        any(isinstance(style.get(key), str) and style[key] for key in ("active_node_name_prefix", "node_name_prefix"))
+        or any(isinstance(roles, dict) and roles.get(key) for key in ("time_main_id", "time_aod_id"))
+        or any(family.get("kind") == "time" for family in snapshot.get("resource_families", []) if isinstance(family, dict))
+        or any(
+            node.get("type") == "COMPONENT"
+            and ("/Num/Time/" in node.get("name", "") or "/Num/TimeDark/" in node.get("name", ""))
+            for node in snapshot.get("nodes", []) if isinstance(node, dict)
+        )
+    )
+
+
 def text_source(node: dict, nodes_by_id: dict) -> dict | None:
     """按原生TEXT识别文字母件，不依赖数字、星期或单位等名称。"""
     if node.get("type") != "TEXT":
@@ -476,6 +550,33 @@ def validate_target_binding(manifest, snapshot):
         return [check_item('snapshot.target_binding', 'pass' if ok else 'fail', '目标清单、快照屏形与缩略图规范绑定核对')]
     except ValueError as exc:
         return [check_item('snapshot.target_binding', 'fail', str(exc))]
+
+
+def validate_capability_binding(manifest, snapshot):
+    modes = manifest.get("capability_modes")
+    if not isinstance(modes, dict):
+        return [check_item("snapshot.capability_binding", "unverified", "清单未声明可多种实现的能力模式")]
+    entries = snapshot.get("native_progress", [])
+    if not isinstance(entries, list):
+        return [check_item("snapshot.capability_binding", "fail", "native_progress 必须是数组")]
+    if not modes and not entries:
+        return [check_item("snapshot.capability_binding", "not_applicable", "已声明未使用可选进度能力")]
+    failures = []
+    by_capability = {}
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("capability"), str):
+            failures.append(str(entry))
+            continue
+        by_capability.setdefault(entry["capability"], []).append(entry)
+    for capability, mode in modes.items():
+        count = len(by_capability.get(capability, []))
+        if mode == "native_continuous" and count != 1:
+            failures.append(f"{capability}:原生连续进度映射数量为{count}")
+        elif mode == "state_images" and count:
+            failures.append(f"{capability}:状态图模式不应声明原生连续进度")
+    extra = sorted(set(by_capability) - set(modes))
+    failures.extend(f"{capability}:快照存在未在清单声明的原生连续进度" for capability in extra)
+    return [check_item("snapshot.capability_binding", "fail" if failures else "pass", "清单实现模式与Figma原生连续进度映射一致", failures)]
 
 
 def validate_target_geometry(snapshot, spec):
@@ -570,7 +671,7 @@ def validate_target_geometry(snapshot, spec):
     return result
 
 
-def validate_snapshot(snapshot: dict) -> list[dict]:
+def validate_snapshot(snapshot: dict, capability_modes: dict | None = None) -> list[dict]:
     checks: list[dict] = []
     config = snapshot.get("config") if isinstance(snapshot.get("config"), dict) else {}
     if config.get("profile") == "preflight" or snapshot.get("evidence_level") == "preflight":
@@ -596,7 +697,7 @@ def validate_snapshot(snapshot: dict) -> list[dict]:
             "snapshot.icon_orientation", "snapshot.state_layout", "snapshot.pointer_annotations", "snapshot.resource_ownership",
             "snapshot.resource_families", "snapshot.time_cutout_pairs", "snapshot.shared_data", "snapshot.state_families", "snapshot.time_roles", "snapshot.aod_style", "snapshot.animations", "snapshot.integer_positions", "snapshot.digit_geometry", "snapshot.text_geometry", "snapshot.progress_tracks",
         ):
-            analog_time_pairs = check_id == "snapshot.time_cutout_pairs" and snapshot.get("face_type") == "analog"
+            analog_time_pairs = check_id == "snapshot.time_cutout_pairs" and snapshot.get("face_type") == "analog" and not has_digital_time(snapshot)
             checks.append(check_item(check_id, "not_applicable" if analog_time_pairs else "unverified", "纯指针表盘不要求数字时间字模配对" if analog_time_pairs else "快照不完整，不能据此推定通过"))
         return checks
     if len(nodes_by_id) != len(nodes):
@@ -705,10 +806,10 @@ def validate_snapshot(snapshot: dict) -> list[dict]:
     for family in progress_resources:
         prefix, segments = family.get("prefix"), family.get("segment_count")
         members = [n for n in board_components if isinstance(prefix, str) and n.get("name", "").startswith(prefix)]
-        if family.get("shape") not in {"regular", "irregular", "battery"} or not is_integer(segments) or segments < 1:
-            progress_unknown.append(str(prefix))
+        if family.get("shape") not in {"regular", "irregular", "segmented"} or not is_integer(segments) or segments < 1:
+            progress_failures.append(str(prefix))
             continue
-        if family["shape"] in {"irregular", "battery"} and family.get("include_track") is not True:
+        if family["shape"] in {"irregular", "segmented"} and family.get("include_track") is not True:
             progress_failures.append(str(prefix))
         if family.get("include_track") is not True:
             continue
@@ -727,7 +828,10 @@ def validate_snapshot(snapshot: dict) -> list[dict]:
     if not progress_resources:
         progress_unknown.append("未提供进度形态与带底规则")
     pointer_progress = snapshot.get("progress_representation") == "pointers" and not progress_resources and any(p.get('role') not in {'Hour','Minute','Second','Hub','HourDark','MinuteDark'} for p in snapshot.get('pointers', []))
-    checks.append(check_item("snapshot.progress_tracks", "not_applicable" if pointer_progress else ("fail" if progress_failures else ("unverified" if progress_unknown else "pass")), "本次进度使用独立数据指针，转轴与范围由指针检查覆盖" if pointer_progress else "异形/电量进度各状态必须保留完整底；普通进度按拆分规则处理", [] if pointer_progress else progress_failures + progress_unknown))
+    native_progress = bool(snapshot.get("native_progress")) and not progress_resources
+    non_state_progress = pointer_progress or native_progress
+    explanation = "本次进度使用独立数据指针，转轴与范围由指针检查覆盖" if pointer_progress else ("本次进度使用原生连续控件，结构由 native_progress 检查覆盖" if native_progress else "异形或分段进度状态必须保留完整底；规则连续进度按实现模式检查")
+    checks.append(check_item("snapshot.progress_tracks", "not_applicable" if non_state_progress else ("fail" if progress_failures else ("unverified" if progress_unknown else "pass")), explanation, [] if non_state_progress else progress_failures + progress_unknown))
     source_only_ids = set(snapshot.get("source_only_node_ids", []))
     invalid_source_only = sorted(source_only_ids - {node["id"] for node in board_components})
     asset_items = [item for item in export_items if isinstance(item, dict) and item.get("role") in {"asset", "aod_full", "presentation_main"}]
@@ -870,7 +974,7 @@ def validate_snapshot(snapshot: dict) -> list[dict]:
     measurements = {}
     measurement_failures = []
     measurement_unverified = []
-    text_component_ids = {node_id for family in snapshot.get("resource_families", []) if family.get("kind") in {"time", "data", "date", "unit", "symbol"} for node_id in family.get("node_ids", [])}
+    text_component_ids = {node_id for family in snapshot.get("resource_families", []) if family.get("kind") in {"time", "second", "data", "date", "unit", "symbol"} for node_id in family.get("node_ids", [])}
     for component in components:
         if component["id"] not in text_component_ids:
             continue
@@ -970,7 +1074,7 @@ def validate_snapshot(snapshot: dict) -> list[dict]:
             time_pairs[active["id"]] = dark["id"]
             time_pairs[dark["id"]] = active["id"]
     pair_status = "fail" if pair_failures else ("unverified" if pair_unknown else "pass")
-    if snapshot.get("face_type") == "analog":
+    if snapshot.get("face_type") == "analog" and not has_digital_time(snapshot):
         checks.append(check_item("snapshot.time_cutout_pairs", "not_applicable", "纯指针表盘不要求数字时间字模配对"))
     else:
         checks.append(check_item("snapshot.time_cutout_pairs", pair_status, "亮屏/AOD时间字模按实际字符逐对同宽同高；包括0–9及分隔符" if pair_status == "pass" else "时间字模配对尺寸不一致、字符不完整或缺少原始配对证据", pair_failures + pair_unknown))
@@ -996,7 +1100,7 @@ def validate_snapshot(snapshot: dict) -> list[dict]:
         digit_measurements = [item for item in family_measurements if re.fullmatch(r"[0-9]", item["character"])]
         common_width = max((item["minimum_width"] for item in digit_measurements), default=0)
         size_failure = any(item["size"][1] != common_height for item in family_measurements)
-        if family.get("kind") in {"data", "date"}:
+        if family.get("kind") in {"second", "data", "date"}:
             size_failure = size_failure or any(item["size"][0] != common_width for item in digit_measurements)
             size_failure = size_failure or any(item["size"][0] != item["minimum_width"] for item in family_measurements if item not in digit_measurements)
         else:
@@ -1012,7 +1116,7 @@ def validate_snapshot(snapshot: dict) -> list[dict]:
         if size_failure or any(len(values) > 1 for values in baseline_groups.values()):
             family_failures.append(family.get("name", "未命名资源族"))
     status = "fail" if family_failures else ("unverified" if not snapshot.get("resource_families") or family_unverified else "pass")
-    checks.append(check_item("snapshot.resource_families", status, "资源族映射或字形测量不足" if status == "unverified" else ("同族宽高或基线规则不满足" if family_failures else "同族尺寸与基线规则满足；symbol 不纳入 0-9 统一宽度"), family_failures + family_unverified))
+    checks.append(check_item("snapshot.resource_families", status, "资源族映射或字形测量不足" if status == "unverified" else ("同族宽高或基线规则不满足" if family_failures else "秒数、数据和日期的同族 0-9 尺寸统一；主时间、symbol 与单位按各自规则"), family_failures + family_unverified))
 
     policy = snapshot.get("shared_data_policy")
     pool_failures, pool_unknown, pools = [], [], {}
@@ -1157,12 +1261,12 @@ def validate_snapshot(snapshot: dict) -> list[dict]:
         unknown = [p['id'] for p in measured if p['sweep_status'] == 'unverified']
         status = "fail" if errors else ("unverified" if not pointers or unknown else "pass")
         checks.append(check_item("snapshot.pointers", status, "核对实际指针母件、旋转矩阵、轴心、全周安全区及遮挡顺序；旋转平移不强制取整", errors+unknown))
-    if snapshot.get("face_type") == "analog":
+    if snapshot.get("face_type") == "analog" and not has_digital_time(snapshot):
         checks = [c for c in checks if c['id'] not in {"snapshot.time_roles", "snapshot.aod_style"}]
     if snapshot.get("face_type") == "analog" or any(p.get("role", "").endswith("Dark") for p in snapshot.get("pointers", [])):
         errors, unknown = validate_aod_pointers(snapshot, snapshot.get("pointers", []))
         checks.append(check_item("snapshot.analog_aod", "fail" if errors else ("unverified" if unknown else "pass"), "亮屏与AOD指针同轴、同角、同尺寸；AOD母件及可见展示实例为至少2px的#B3B3B3描边", errors+unknown))
-    checks.extend(validate_delivery_guards(snapshot))
+    checks.extend(validate_delivery_guards(snapshot, capability_modes))
     return checks
 
 
@@ -1183,7 +1287,11 @@ def validate_pngs(snapshot: dict, exports_dir: Path) -> list[dict]:
         return [check_item('exports.target_geometry', 'fail', str(exc))]
     for item in export_items:
         node = nodes_by_id.get(item.get("node_id"))
-        path = exports_dir / item.get("path", "")
+        try:
+            path = safe_path(exports_dir, item.get("path", ""))
+        except (TypeError, ValueError) as exc:
+            failures.append(f"导出路径无效：{item.get('path')} ({exc})")
+            continue
         if node is None:
             failures.append(f"正式导出项节点不存在：{item.get('node_id')}")
             continue
@@ -1284,6 +1392,338 @@ def manual_checks() -> list[dict]:
     ]
 
 
+def _contains_similarity_score(value: object) -> bool:
+    if isinstance(value, dict):
+        return any(
+            key in {"similarity_score", "similarity_percent", "similarity_percentage"}
+            or _contains_similarity_score(child)
+            for key, child in value.items()
+        )
+    if isinstance(value, list):
+        return any(_contains_similarity_score(child) for child in value)
+    return False
+
+
+def _visual_artifact(
+    review_root: Path,
+    value: object,
+    artifact_id: str,
+    errors: list[str],
+    registry: dict[str, tuple[int, int]],
+    expected_size: tuple[int, int],
+) -> None:
+    if not isinstance(value, dict):
+        errors.append(f"{artifact_id} 证据必须是对象")
+        return
+    relative = value.get("path")
+    digest = value.get("sha256")
+    if not isinstance(relative, str) or not relative.strip():
+        errors.append(f"{artifact_id} 缺少路径")
+        return
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", digest):
+        errors.append(f"{artifact_id} 缺少有效 SHA-256")
+        return
+    try:
+        path = safe_path(review_root, relative)
+    except ValueError as exc:
+        errors.append(f"{artifact_id}：{exc}")
+        return
+    if not path.is_file():
+        errors.append(f"{artifact_id} 文件不存在：{relative}")
+        return
+    if file_sha256(path).lower() != digest.lower():
+        errors.append(f"{artifact_id} 文件哈希不匹配：{relative}")
+        return
+    if artifact_id in registry:
+        errors.append(f"视觉证据 ID 重复：{artifact_id}")
+        return
+    try:
+        from PIL import Image
+        with Image.open(path) as image:
+            image.verify()
+        with Image.open(path) as image:
+            if image.format != "PNG":
+                raise ValueError("不是 PNG")
+            size = image.size
+    except (ImportError, OSError, ValueError) as exc:
+        errors.append(f"{artifact_id} 不是可解码的 PNG：{relative} ({exc})")
+        return
+    if size != expected_size:
+        errors.append(f"{artifact_id} 图片尺寸应为 {expected_size[0]}×{expected_size[1]}，实际为 {size[0]}×{size[1]}")
+        return
+    registry[artifact_id] = size
+
+
+def validate_workflow_binding(
+    manifest: dict,
+    contract_path: Path | None,
+    visual_review_path: Path | None,
+    snapshot_path: Path | None,
+    exports_dir: Path | None = None,
+    snapshot: dict | None = None,
+    *, required_gate: str = "visual_preflight",
+) -> list[dict]:
+    if contract_path is None:
+        return [
+            check_item(
+                "workflow.contract",
+                "unverified",
+                "旧项目未提供 workflow-contract.json；自动检查保持兼容，但不能取得新任务正式交付通过状态",
+            ),
+            check_item(
+                "workflow.visual_review",
+                "unverified",
+                "未提供工作流合同，无法绑定视觉预检证据",
+            ),
+        ]
+
+    contract_errors: list[str] = []
+    contract = None
+    try:
+        contract = load_contract(contract_path)
+        contract_errors.extend(gate_failures(contract, required_gate))
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        contract_errors.append(str(exc))
+
+    if contract is not None:
+        target = contract["target"]
+        canvas = manifest.get("canvas") if isinstance(manifest.get("canvas"), dict) else {}
+        if target.get("width") != canvas.get("width") or target.get("height") != canvas.get("height"):
+            contract_errors.append("合同目标尺寸与清单 canvas 不一致")
+        manifest_shape = canvas.get("shape", "circle")
+        if ("rounded_rect" if target.get("shape") == "round_rect" else target.get("shape")) != manifest_shape:
+            contract_errors.append("合同屏形与清单 canvas 不一致")
+        source = manifest.get("source_strategy")
+        if not isinstance(source, dict):
+            contract_errors.append("清单缺少 source_strategy，无法核对素材来源")
+        else:
+            if source.get("mode") != contract["source_strategy"].get("mode"):
+                contract_errors.append("合同与清单的素材来源策略不一致")
+            if source.get("reference_image_hashes") != contract["reference_contract"].get("reference_hashes"):
+                contract_errors.append("合同与清单的参考图哈希不一致")
+
+    contract_check = check_item(
+        "workflow.contract",
+        "fail" if contract_errors else "pass",
+        "；".join(contract_errors) if contract_errors else "工作流合同结构、阶段顺序、目标和来源绑定通过",
+        contract_errors,
+    )
+    if contract is None:
+        return [
+            contract_check,
+            check_item("workflow.visual_review", "fail", "合同无效，无法验证视觉预检"),
+        ]
+
+    visual_errors: list[str] = []
+    if visual_review_path is None:
+        visual_errors.append("新工作流缺少 visual-review.json")
+        review = None
+    else:
+        try:
+            review = json.loads(visual_review_path.read_text(encoding="utf-8"))
+            if not isinstance(review, dict):
+                raise ValueError("视觉预检根节点必须是对象")
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            visual_errors.append(f"视觉预检无法读取：{exc}")
+            review = None
+
+    if review is not None:
+        if review.get("schema_version") != 1:
+            visual_errors.append("visual-review.schema_version 必须为 1")
+        if _contains_similarity_score(review):
+            visual_errors.append("视觉预检不得使用自拟相似百分比或相似分数")
+        if review.get("workflow_contract_sha256") != file_sha256(contract_path):
+            visual_errors.append("视觉预检绑定的合同哈希不是当前合同")
+        if snapshot_path is None or not snapshot_path.is_file():
+            visual_errors.append("缺少当前 Figma 快照，无法绑定视觉预检")
+        elif review.get("snapshot_sha256") != file_sha256(snapshot_path):
+            visual_errors.append("视觉预检绑定的快照哈希不是当前快照")
+        expected_references = contract["reference_contract"]["reference_hashes"]
+        if review.get("reference_hashes") != expected_references:
+            visual_errors.append("视觉预检参考图哈希与合同不一致")
+
+        manifest_source = manifest.get("source_strategy", {})
+        expected_sources = {
+            "reference": manifest_source.get("reference_image_hashes", []),
+            "adopted": manifest_source.get("adopted_image_hashes", []),
+            "reused": manifest_source.get("reused_image_hashes", []),
+        }
+        if review.get("source_hashes") != expected_sources:
+            visual_errors.append("视觉预检素材来源哈希与清单不一致")
+
+        implementation_path = None
+        implementation = review.get("implementation_export")
+        if not isinstance(implementation, dict):
+            visual_errors.append("视觉预检缺少当前实现图导出绑定")
+        elif exports_dir is None or not isinstance(snapshot, dict):
+            visual_errors.append("缺少当前导出目录或快照，无法核对实现图")
+        else:
+            node_id = implementation.get("node_id")
+            relative = implementation.get("path")
+            digest = implementation.get("sha256")
+            export_item = next(
+                (
+                    item for item in snapshot.get("export_items", [])
+                    if isinstance(item, dict)
+                    and item.get("node_id") == node_id
+                    and item.get("path") == relative
+                    and item.get("role") == "presentation_main"
+                ),
+                None,
+            )
+            if export_item is None:
+                visual_errors.append("实现图未绑定当前快照的 presentation_main 导出项")
+            elif not isinstance(digest, str) or re.fullmatch(r"[0-9a-fA-F]{64}", digest) is None:
+                visual_errors.append("实现图缺少有效 SHA-256")
+            else:
+                try:
+                    implementation_path = safe_path(exports_dir, relative)
+                    if not implementation_path.is_file() or file_sha256(implementation_path) != digest:
+                        visual_errors.append("实现图文件缺失或哈希与当前导出不一致")
+                        implementation_path = None
+                    if review.get("implementation_sha256") != digest:
+                        visual_errors.append("实现图摘要与导出绑定不一致")
+                except (OSError, ValueError) as exc:
+                    visual_errors.append(f"实现图导出路径无效：{exc}")
+
+        artifacts = review.get("artifacts")
+        registry: dict[str, tuple[int, int]] = {}
+        valid_crops = []
+        target_width = contract["target"]["width"]
+        target_height = contract["target"]["height"]
+        if not isinstance(artifacts, dict):
+            visual_errors.append("visual-review.artifacts 必须是对象")
+        else:
+            _visual_artifact(
+                visual_review_path.parent, artifacts.get("side_by_side"), "side_by_side",
+                visual_errors, registry, (target_width * 2, target_height),
+            )
+            _visual_artifact(
+                visual_review_path.parent, artifacts.get("overlay"), "overlay",
+                visual_errors, registry, (target_width, target_height),
+            )
+            crops = artifacts.get("crops")
+            if not isinstance(crops, list) or not crops:
+                visual_errors.append("视觉预检必须至少包含一个关键区域局部图")
+            else:
+                for index, crop in enumerate(crops):
+                    crop_id = crop.get("id") if isinstance(crop, dict) else None
+                    if not isinstance(crop_id, str) or not crop_id.strip():
+                        visual_errors.append(f"crops[{index}] 缺少唯一 id")
+                        continue
+                    if crop_id in {"side_by_side", "overlay"} or crop_id in registry:
+                        visual_errors.append(f"视觉证据 ID 重复或使用保留名称：{crop_id}")
+                        continue
+                    bounds = crop.get("bounds")
+                    if (
+                        not isinstance(bounds, list) or len(bounds) != 4
+                        or any(not isinstance(value, int) or isinstance(value, bool) for value in bounds)
+                    ):
+                        visual_errors.append(f"crops[{index}] 缺少整数 bounds")
+                        continue
+                    x, y, width, height = bounds
+                    if width <= 0 or height <= 0 or x < 0 or y < 0 or x + width > target_width or y + height > target_height:
+                        visual_errors.append(f"crops[{index}] bounds 超出目标画布")
+                        continue
+                    _visual_artifact(
+                        visual_review_path.parent, crop, crop_id, visual_errors,
+                        registry, (width * 2, height),
+                    )
+                    if crop_id in registry:
+                        valid_crops.append(crop)
+
+        reference_input = review.get("reference_input")
+        try:
+            if not isinstance(reference_input, dict):
+                raise ValueError("缺少原始参考图输入记录")
+            digest = reference_input.get("sha256")
+            if not isinstance(digest, str) or digest not in expected_references:
+                raise ValueError("原始参考图哈希未登记在合同中")
+            reference_path = safe_path(visual_review_path.parent, reference_input.get("path"))
+            if file_sha256(reference_path) != digest:
+                raise ValueError("原始参考图文件哈希不一致")
+            if implementation_path is not None:
+                from PIL import Image
+                crop_boxes = []
+                descriptors = {"side_by_side": artifacts.get("side_by_side"), "overlay": artifacts.get("overlay")} if isinstance(artifacts, dict) else {}
+                for crop in valid_crops:
+                    x, y, width, height = crop["bounds"]
+                    crop_boxes.append((crop["id"], (x, y, x + width, y + height)))
+                    descriptors[crop["id"]] = crop
+                with Image.open(reference_path) as reference_image, Image.open(implementation_path) as implementation_image:
+                    expected_images = comparison_images(reference_image, implementation_image, (target_width, target_height), crop_boxes)
+                for artifact_id in registry:
+                    path = safe_path(visual_review_path.parent, descriptors[artifact_id]["path"])
+                    with Image.open(path) as actual:
+                        if actual.convert("RGBA").tobytes() != expected_images[artifact_id].tobytes():
+                            visual_errors.append(f"{artifact_id} 不是由当前参考图和实现图生成的视觉证据")
+        except (ImportError, OSError, ValueError, TypeError) as exc:
+            visual_errors.append(f"视觉证据输入或派生关系无效：{exc}")
+
+        checks = review.get("checks")
+        checked: set[str] = set()
+        if not isinstance(checks, list):
+            visual_errors.append("visual-review.checks 必须是数组")
+        else:
+            for index, item in enumerate(checks):
+                if not isinstance(item, dict):
+                    visual_errors.append(f"checks[{index}] 必须是对象")
+                    continue
+                invariant = item.get("invariant")
+                if not isinstance(invariant, str) or not invariant.strip() or invariant in checked:
+                    visual_errors.append(f"checks[{index}].invariant 缺失或重复")
+                    continue
+                checked.add(invariant)
+                if not isinstance(item.get("status"), str) or item.get("status") not in {"pass", "fail", "unverified"}:
+                    visual_errors.append(f"{invariant} 的视觉结论状态无效")
+                elif item.get("status") != "pass":
+                    visual_errors.append(f"{invariant} 的视觉结论仍为 {item.get('status')}")
+                evidence = item.get("evidence")
+                if not isinstance(evidence, list) or not evidence or any(not isinstance(value, str) for value in evidence):
+                    visual_errors.append(f"{invariant} 缺少视觉证据引用")
+                else:
+                    missing = [value for value in evidence if value not in registry]
+                    if missing:
+                        visual_errors.append(f"{invariant} 引用了不存在的视觉证据：{', '.join(map(str, missing))}")
+            missing_invariants = [
+                value for value in contract["reference_contract"]["invariants"] if value not in checked
+            ]
+            if missing_invariants:
+                visual_errors.append("视觉预检遗漏合同不变量：" + "、".join(missing_invariants))
+
+    visual_check = check_item(
+        "workflow.visual_review",
+        "fail" if visual_errors else "pass",
+        "；".join(visual_errors) if visual_errors else "同尺寸并排图、叠图、局部图及逐项视觉结论与当前合同和快照绑定",
+        visual_errors,
+    )
+    return [contract_check, visual_check]
+
+
+def production_validation_check(checks: list[dict], missing: list[str]) -> dict:
+    applicable = [
+        item for item in checks
+        if not item.get("id", "").startswith("manual.")
+        and item.get("id") != "workflow.production_validation"
+    ]
+    incomplete = [
+        item.get("id", "未知检查")
+        for item in applicable
+        if item.get("status") not in {"pass", "not_applicable"}
+    ]
+    details = []
+    if missing:
+        details.append("缺少 " + "、".join(missing))
+    if incomplete:
+        details.append("未通过 " + "、".join(sorted(incomplete)))
+    return check_item(
+        "workflow.production_validation",
+        "fail" if details else "pass",
+        "；".join(details) if details else "全部适用的自动检查、合同、快照、视觉预检、正式PNG和本轮导出绑定均通过",
+        missing + incomplete,
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="校验表盘清单与原始证据")
     parser.add_argument("manifest", type=Path)
@@ -1291,6 +1731,8 @@ def main() -> int:
     parser.add_argument("--exports-dir", type=Path)
     parser.add_argument("--report", type=Path)
     parser.add_argument("--evidence", type=Path, help="本轮来源和实际导出文件的绑定记录")
+    parser.add_argument("--workflow-contract", type=Path, help="本项目工作流合同")
+    parser.add_argument("--visual-review", type=Path, help="与当前合同及快照绑定的视觉预检记录")
     args = parser.parse_args()
     path = args.manifest
     try:
@@ -1314,8 +1756,9 @@ def main() -> int:
             snapshot = json.loads(args.snapshot.read_text(encoding="utf-8"))
             if not isinstance(snapshot, dict):
                 raise ValueError("根节点必须是 JSON 对象")
-            checks.extend(validate_snapshot(snapshot))
+            checks.extend(validate_snapshot(snapshot, data.get("capability_modes")))
             checks.extend(validate_target_binding(data, snapshot))
+            checks.extend(validate_capability_binding(data, snapshot))
             checks.append(check_item("snapshot.stability", "pass" if stable_snapshot(snapshot) else "unverified", "核对采集前后内容与引用签名；旧快照不证明稳定"))
         except (OSError, json.JSONDecodeError, ValueError) as exc:
             checks.append(check_item("snapshot.structure", "fail", f"快照无法读取：{exc}", [str(args.snapshot)]))
@@ -1340,13 +1783,51 @@ def main() -> int:
             checks.append(check_item("exports.binding", "fail", f"本轮证据无法校验：{exc}"))
     else:
         checks.append(check_item("exports.binding", "unverified", "未同时提供本轮证据、快照和PNG目录，不能证明文件属于当前设计"))
+    checks.extend(validate_workflow_binding(
+        data, args.workflow_contract, args.visual_review, args.snapshot,
+        args.exports_dir, snapshot,
+    ))
+    if args.workflow_contract:
+        required = {
+            "snapshot": args.snapshot,
+            "exports-dir": args.exports_dir,
+            "evidence": args.evidence,
+            "visual-review": args.visual_review,
+        }
+        missing = [name for name, value in required.items() if value is None]
+        checks.append(production_validation_check(checks, missing))
+    else:
+        checks.append(check_item(
+            "workflow.production_validation",
+            "unverified",
+            "旧项目未提供工作流合同，不能取得新任务正式生产校验通过状态",
+        ))
     checks.extend(manual_checks())
+    production_check = next(item for item in checks if item["id"] == "workflow.production_validation")
+    contract_check = next(item for item in checks if item["id"] == "workflow.contract")
+    draft_failures = [
+        item for item in checks
+        if item["status"] == "fail"
+        and not item["id"].startswith("exports.")
+        and item["id"] != "workflow.production_validation"
+    ]
+    delivery = {
+        "draft_review": "fail" if draft_failures else ("pass" if contract_check["status"] == "pass" else contract_check["status"]),
+        "production_validation": production_check["status"],
+        "user_acceptance": "unverified",
+        "firmware_validation": "unverified",
+    }
     if args.report:
         report = {
             "schema_version": 1,
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "checks": checks,
             "summary": dict(Counter(item["status"] for item in checks)),
+            "delivery": delivery,
+            "inputs": {name: file_sha256(value) for name, value in {
+                "manifest": path, "snapshot": args.snapshot, "evidence": args.evidence,
+                "workflow_contract": args.workflow_contract, "visual_review": args.visual_review,
+            }.items() if value is not None and value.is_file()},
             "exit_code_meaning": "0 仅表示已执行的自动检查无失败，不代表完整验收",
         }
         args.report.parent.mkdir(parents=True, exist_ok=True)
