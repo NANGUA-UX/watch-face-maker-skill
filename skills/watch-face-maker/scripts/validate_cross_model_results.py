@@ -78,7 +78,7 @@ def _target_key(target: object) -> tuple[str, str, str]:
     return tuple(target[field] for field in ("file_key", "page_id", "section_id"))
 
 
-def revalidate_production(paths: dict[str, Path], exports: Path) -> None:
+def revalidate_production(paths: dict[str, Path], exports: Path) -> dict:
     """通过正式入口复查当前产物，历史报告不能替代当前验收。"""
     with tempfile.TemporaryDirectory(prefix="watch-face-production-") as directory:
         report_path = Path(directory) / "report.json"
@@ -96,6 +96,7 @@ def revalidate_production(paths: dict[str, Path], exports: Path) -> None:
         report = _read_object(report_path)
         if result.returncode != 0 or report.get("delivery", {}).get("production_validation") != "pass":
             raise ValueError("当前正式生产校验未通过：" + result.stdout[-2000:])
+        return report
 
 
 def validate_build_evidence(run: dict, plan: dict, root: Path) -> list[str]:

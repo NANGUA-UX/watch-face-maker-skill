@@ -6,6 +6,7 @@ import argparse
 import copy
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -211,24 +212,40 @@ def remote_evidence(root, name):
     return e
 
 
-def status(root, spec, state, artifacts=None, exports_dir='exports'):
+def requirement_blockers(spec, state, contract):
+    if spec != state.get('spec'):
+        return ['需求已变化，请先同步；旧合同不得推进门禁']
+    blockers = [c['explanation'] for c in preflight(spec)['local_checks']
+                if c['id'].startswith('requirements.') and c['status'] != 'pass']
+    for field, expected in derived(spec)['workflow_contract'].items():
+        if get(contract, field) != expected:
+            blockers.append('合同与当前需求不一致：'+field+'；请先处理冲突并同步')
+    if state.get('conflicts'):
+        blockers.append('导入冲突尚未同步解决')
+    return blockers
+
+
+def status(root, spec, state, artifacts=None, exports_dir='exports', *, validated_report=None):
     paths = {key: inside(root, value) for key, value in dict(state['views'], **(artifacts or ARTIFACTS)).items() if key != 'config'}
     contract = read(paths['workflow_contract']) if paths['workflow_contract'].exists() else {}
     stale = set(state.get('stale_artifacts', []))
-    ready, production, blockers = False, 'unverified', []
+    ready, production, blockers = False, 'unverified', requirement_blockers(spec, state, contract)
     if spec != state.get('spec'):
         blockers.append('需求已变化，请先同步；原证据待重新采集')
         stale.update(v.name for v in paths.values() if v.is_file())
     required = ('manifest', 'snapshot', 'evidence', 'workflow_contract', 'visual_review')
-    if paths['report'].is_file():
-        report = read(paths['report'])
+    if validated_report is not None or paths['report'].is_file():
+        report = validated_report if validated_report is not None else read(paths['report'])
         inputs = report.get('inputs', {})
+        if not isinstance(inputs, dict) or not isinstance(report.get('delivery', {}), dict):
+            raise ValueError('报告inputs和delivery必须是对象')
         current = all(paths[k].is_file() and inputs.get(k) == digest(paths[k]) for k in required)
         if not current:
             stale.add(paths['report'].name)
         elif not blockers and report.get('delivery', {}).get('production_validation') == 'pass':
             try:
-                revalidate_production(paths, inside(root, exports_dir))
+                if validated_report is None:
+                    revalidate_production(paths, inside(root, exports_dir))
                 ready, production = True, 'pass'
                 stale.clear()
             except ValueError as exc:
@@ -281,21 +298,31 @@ def main():
             elif args.command == 'preflight':
                 result = preflight(spec, remote_evidence(root, args.figma_evidence))
             elif args.command == 'check' and args.gate:
-                if spec != state.get('spec'):
-                    result = dict(exit_code=1, summary='需求已变化，请先同步；旧合同不得推进门禁')
+                contract_path = inside(root, state['views']['workflow_contract'])
+                blockers = requirement_blockers(spec, state, read(contract_path))
+                if blockers:
+                    result = dict(exit_code=1, blockers=blockers, summary='；'.join(blockers))
                 else:
                     command = [sys.executable, str(Path(__file__).with_name('workflow_guards.py')),
-                               str(inside(root, state['views']['workflow_contract'])), '--gate', args.gate]
+                               str(contract_path), '--gate', args.gate]
                     run = subprocess.run(command, capture_output=True, text=True)
                     result = dict(exit_code=run.returncode, summary=run.stdout+run.stderr)
             elif args.command == 'check':
                 result = status(root, spec, state, artifacts, args.exports_dir)
-                if spec == state.get('spec'):
+                if not requirement_blockers(spec, state, read(inside(root, state['views']['workflow_contract']))):
                     paths = {k: inside(root, v) for k, v in dict(state['views'], **artifacts).items() if k != 'config'}
                     if all(paths[k].is_file() for k in ('manifest', 'snapshot', 'evidence', 'workflow_contract', 'visual_review')):
                         try:
-                            revalidate_production(paths, inside(root, args.exports_dir))
-                            result.update(exit_code=0, production_validation='pass', production_ready=True)
+                            report = revalidate_production(paths, inside(root, args.exports_dir))
+                            result = status(root, spec, state, artifacts, args.exports_dir, validated_report=report)
+                            if result['production_ready'] and spec['operation'] != 'audit':
+                                previous = paths['report']
+                                if previous.is_file():
+                                    history = previous.parent/'history'/(previous.stem+'-'+digest(previous)+previous.suffix)
+                                    history.parent.mkdir(parents=True, exist_ok=True)
+                                    if not history.is_file():
+                                        shutil.copyfile(previous, history)
+                                save(previous, report)
                         except ValueError as exc:
                             result.update(exit_code=1, production_validation='fail', blockers=[str(exc)])
             else:

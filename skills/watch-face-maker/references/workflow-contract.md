@@ -25,4 +25,4 @@
 python3 "<SKILL_DIR>/scripts/workflow_guards.py" workflow-contract.json --gate prototype
 ```
 
-脚本只读合同，不修改文件。返回码 `0` 为通过、`1` 为门禁失败、`2` 为合同结构无效。
+这是只读合同的底层检查，不绑定project-spec。已建立项目事实的任务必须使用`watch_face.py check <项目目录> --gate prototype`先核对当前需求，再进入合同门禁。返回码 `0` 为通过、`1` 为门禁失败、`2` 为输入结构无效。

@@ -533,8 +533,12 @@ def validate_digit_geometry(nodes_by_id: dict, all_text: bool = False, baseline_
         baseline_symbol = all_text and bool(re.fullmatch(r"[.:,;+-]", str(node.get("characters", ""))))
         shared_baseline = source['id'] in baseline_ids
         if shared_baseline:
+            text_origin = node_origin(node)
+            if text_origin is None or not has_translation_only_transform(node):
+                unknown.append(node['id'])
+                continue
             key = (baseline_ids[source['id']], json.dumps([node.get('font_name'), node.get('font_size')], sort_keys=True))
-            baselines.setdefault(key, []).append((node['id'], round(node['y'], 3)))
+            baselines.setdefault(key, []).append((node['id'], round(text_origin[1] - origin[1], 3)))
         center_error = abs(margins[0] - margins[2]) if baseline_symbol or shared_baseline else max(abs(margins[0] - margins[2]), abs(margins[1] - margins[3]))
         if min(bounds["width"], bounds["height"]) <= 0 or min(margins) < 0 or center_error > .102:
             failures.append(node["id"])
@@ -1120,12 +1124,13 @@ def validate_snapshot(snapshot: dict, capability_modes: dict | None = None) -> l
         else:
             size_failure = size_failure or any(item["size"][0] != max(item["minimum_width"], measurements.get(time_pairs.get(node_id), {}).get("minimum_width", 0)) for node_id, item in zip(family.get("node_ids", []), family_measurements))
         baseline_groups = {}
+        shared_baseline = family.get('baseline_policy') == 'shared_font_baseline'
         for item in family_measurements:
             # 数字以实际可见字形居中；7/9等高度不同的字形需要微调Y。
             # 不把文本框同Y误当作居中，符号与单位仍保留各自字体基线。
-            if snapshot.get("digit_geometry") is True and re.fullmatch(r"[0-9]", item["character"]):
+            if not shared_baseline and snapshot.get("digit_geometry") is True and re.fullmatch(r"[0-9]", item["character"]):
                 continue
-            baseline_key = (item["font"], item["character"] in "0123456789" and len(item["character"]) == 1) if snapshot.get("digit_geometry") is True else item["font"]
+            baseline_key = (item["font"], item["character"] in "0123456789" and len(item["character"]) == 1) if snapshot.get("digit_geometry") is True and not shared_baseline else item["font"]
             baseline_groups.setdefault(baseline_key, set()).add(round(item["text_origin_y"], 3))
         if size_failure or any(len(values) > 1 for values in baseline_groups.values()):
             family_failures.append(family.get("name", "未命名资源族"))

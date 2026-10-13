@@ -34,3 +34,7 @@ python3 "<SKILL_DIR>/scripts/watch_face.py" check <项目目录> --json
 事实变化标记旧证据过期并重置合同门禁，原快照、报告和导出回执保留。`status`只读；合同标签或视觉通过不能证明生产通过。当前报告必须绑定现有文件哈希，并重新调用原正式校验器。统一入口的默认证据文件为 `snapshot.json/evidence.json/visual-review.json/report.json`，PNG目录为 `exports`；已有项目采用其他名称时保留原文件，通过 `status/check --snapshot <原快照> --evidence <原回执> --visual-review <原视觉记录> --report <原报告> --exports-dir <原PNG目录>`显式传参。
 
 退出码统一：`0`可继续，`1`检查未通过或事实待确认，`2`输入结构无效。初始化成功仅表示建立待完成模板，不代表允许写入Figma或完成制作。
+
+`check --gate`与正式`check/status`都会核对已确认的目标、来源策略、开发依据和合同需求派生字段；state与事实相同不代表替换进来的旧合同仍有效。阶段门禁只证明阶段条件，写入前仍需单独通过现场预检。
+
+正式`check`成功后保存校验器实际生成的当前报告，替换前将旧报告原始字节留在报告所在目录的`history/<报告名>-<SHA256>.json`。`status`根据当前输入哈希与重新校验结果判断，不改文件。`audit`的`check`只返回本次结果，不保存报告；后续`status`仍需可用的当前报告。

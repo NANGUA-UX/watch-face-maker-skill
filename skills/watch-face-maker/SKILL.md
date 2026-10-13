@@ -24,10 +24,10 @@ description: Use when 用户需要在 Figma 中新建、复刻、适配或整理
 从[合同示例](references/workflow-contract.example.json)复制项目合同后替换全部项目事实；示例中的待确认值不能直接通过门禁。进入阶段前运行：
 
 ```bash
-python3 "<SKILL_DIR>/scripts/workflow_guards.py" <workflow-contract.json> --gate <intake|reference|prototype|assembly|visual_preflight>
+python3 "<SKILL_DIR>/scripts/watch_face.py" check <项目目录> --gate <intake|reference|prototype|assembly|visual_preflight>
 ```
 
-返回码 `0` 才能进入下一阶段；`1` 表示门禁失败，`2` 表示合同结构无效。完整字段与失败规则见[工作流合同](references/workflow-contract.md)。
+返回码 `0` 才能进入下一阶段；`1` 表示门禁失败，`2` 表示输入结构无效。入口核对当前需求确认及合同派生字段，再调用合同门禁。完整字段与失败规则见[工作流合同](references/workflow-contract.md)。
 
 ## 跨阶段硬规则
 

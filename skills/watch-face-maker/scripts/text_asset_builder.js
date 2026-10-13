@@ -3,6 +3,9 @@
  */
 const textAssetKinds = new Set(['time_hour','time_minute','second','data','date','symbol','unit','week','month','label']);
 const assetGray = [{type:'SOLID',color:{r:179/255,g:179/255,b:179/255}}];
+const assetPngExport = [{format:'PNG',constraint:{type:'SCALE',value:1},suffix:''}];
+const assetExportState = settings => Array.isArray(settings) ? settings.map(s=>({contentsOnly:true,
+  useAbsoluteBounds:false,colorProfile:'DOCUMENT',...s})) : settings;
 const cloneAssetValue = value => JSON.parse(JSON.stringify(value));
 const assetRound = (v, step) => Math.max(step, Math.ceil((v-1e-7)/step)*step);
 const assetGrid = (v, min, max) => {
@@ -56,7 +59,7 @@ function textAssetNodeState(node) {
   if(!node) return null;
   const fields=['x','y','width','height','relativeTransform','characters','fontName','fontSize','textAutoResize',
     'lineHeight','letterSpacing','textCase','textDecoration','textAlignHorizontal','textAlignVertical','fills','strokes',
-    'strokeWeight','strokeAlign','effects','layoutMode','clipsContent','visible','locked','overrides','constraints'];
+    'strokeWeight','strokeAlign','effects','layoutMode','clipsContent','visible','locked','overrides','constraints','exportSettings'];
   const state={id:node.id,name:node.name,type:node.type,parent_id:node.parent?.id};
   for(const field of fields) if(field in node) state[field]=node[field];
   if(node.type==='TEXT') state.segments=node.getStyledTextSegments(['fontName','fontSize','lineHeight','letterSpacing','fills']);
@@ -81,6 +84,7 @@ async function checkRepairScope(component, scope) {
   const instances=await component.getInstancesAsync();
   for(const instance of instances) {
     if(!scope.instance_ids.includes(instance.id)) throw Error('范围外关联实例：'+instance.id);
+    if(instance.locked) throw Error('关联实例已锁定：'+instance.id);
     // 实例自身type为INSTANCE，检查父布局；尺寸覆盖无法可靠补偿。
     checkAssetLayout(instance.parent);
     const t=instance.relativeTransform;
@@ -150,7 +154,7 @@ function setAssetTextStyle(text, style, aod) {
   text.strokeAlign='CENTER';text.effects=[];
 }
 
-function checkRequestedTextStyle(record, expected) {
+function checkRequestedTextStyle(record, expected, operation) {
   if(!record.text) return;
   const actual=styleOfText(record.text),font=expected.font_name;
   if(!font || actual.font_name.family!==font.family || actual.font_name.style!==font.style ||
@@ -160,6 +164,7 @@ function checkRequestedTextStyle(record, expected) {
   for(const key of ['line_height','letter_spacing','text_case','text_decoration'])
     if(expected[key]!==undefined && assetCanonical(expected[key])!==assetCanonical(actual[key]))
       throw Error('已有母件字体样式与要求冲突：'+record.entry.path);
+  if(operation==='modify' && record.family.aod) return;
   const equal=(a,b)=>{
     if(typeof a==='number' && typeof b==='number')return Math.abs(a-b)<1e-6;
     if(a && b && typeof a==='object' && typeof b==='object') {
@@ -191,8 +196,9 @@ async function measureTextAssets(input, api=figma) {
     const familyStyles=new Map();
     for(const r of inspected.records) {
       const expected=r.source ? styleOfText(r.source) : cloneAssetValue(r.family.style);
-      checkRequestedTextStyle(r,expected);
+      checkRequestedTextStyle(r,expected,input.operation);
       const style=r.text ? styleOfText(r.text) : (r.source ? styleOfText(r.source) : cloneAssetValue(r.family.style));
+      if(r.family.aod) style.stroke_weight=Math.max(2,style.stroke_weight || 0,expected.stroke_weight || 0);
       if(!style?.font_name || !Number.isFinite(style.font_size) || style.font_size<=0 ||
          !assetFontAvailable(fonts,style.font_name)) throw Error('指定字体不可用；禁止替换');
       await api.loadFontAsync(style.font_name);
@@ -200,11 +206,12 @@ async function measureTextAssets(input, api=figma) {
       // createText默认字体也必须加载后才能改变并归入容器。
       await api.loadFontAsync(text.fontName);
       setAssetTextStyle(text,style,r.family.aod===true);
-      style.font_name=cloneAssetValue(text.fontName);style.line_height=cloneAssetValue(text.lineHeight);style.letter_spacing=cloneAssetValue(text.letterSpacing);
+      text.characters=r.entry.characters;
+      Object.assign(style,styleOfText(text));
       const shared=assetCanonical([style.font_name,style.font_size,style.line_height,style.letter_spacing]);
       if(familyStyles.has(r.family.id) && familyStyles.get(r.family.id)!==shared) throw Error('同族字体排版不一致；不支持近似测量');
       familyStyles.set(r.family.id,shared);
-      text.characters=r.entry.characters;text.textAutoResize='WIDTH_AND_HEIGHT';text.textAlignHorizontal='LEFT';
+      text.textAutoResize='WIDTH_AND_HEIGHT';text.textAlignHorizontal='LEFT';
       container.appendChild(text);text.x=0;text.y=0;
       const {advance_width:advance,line_height:lineHeight,bounds}=prepareAssetMeasurementText(text);
       records.push({family_id:r.family.id,kind:r.family.kind,entry:cloneAssetValue(r.entry),style,
@@ -239,15 +246,18 @@ function planTextAssets(measurement) {
        !r.entry?.characters || /[\r\n]/.test(r.entry.characters) || paths.has(r.entry.path)) throw Error('字形测量不完整、非单行或路径重复');
     paths.set(r.entry.path,r);
   }
-  const groups=new Map();
+  const pairs=new Map(records.map(r=>[r.entry.path,new Set()]));
   for(const r of records) {
-    const key=r.family_id;
-    if(!groups.has(key)) groups.set(key,[]);
-    groups.get(key).push(r);
     if(r.entry.pair_path) {
       const pair=paths.get(r.entry.pair_path);
-      if(!pair || pair.entry.characters!==r.entry.characters || pair.aod===r.aod) throw Error('亮屏/AOD配对缺失或字符错误');
+      if(!pair || pair.entry.characters!==r.entry.characters || pair.aod===r.aod || pair.kind!==r.kind)
+        throw Error('亮屏/AOD配对缺失、字符或资源类型不一致');
+      pairs.get(r.entry.path).add(pair.entry.path);pairs.get(pair.entry.path).add(r.entry.path);
     }
+  }
+  for(const r of records) {
+    const count=pairs.get(r.entry.path).size;
+    if(count>1 || (r.aod && count!==1)) throw Error('亮屏/AOD必须完整且一一配对：'+r.entry.path);
   }
   // 配对族共同纵向包络，保留标点的字体基线。
   const groupFor=r=>{
@@ -300,7 +310,9 @@ async function applyTextAssets(plan, api=figma) {
   for(let i=0;i<plan.edits.length;i++) {
     const edit=plan.edits[i],{component,text}=inspected.records[i];
     if(component && plan.measurement.input.operation==='create' &&
-       (component.width!==edit.width || component.height!==edit.height || text.textAlignHorizontal!=='CENTER' ||
+       (component.x!==edit.entry.x || component.y!==edit.entry.y ||
+        assetCanonical(assetExportState(component.exportSettings))!==assetCanonical(assetExportState(assetPngExport)) ||
+        component.width!==edit.width || component.height!==edit.height || text.textAlignHorizontal!=='CENTER' ||
         text.width!==edit.text_width || text.height!==edit.text_height || Math.abs(text.x-edit.text_x)>1e-5 || Math.abs(text.y-edit.text_y)>1e-5 ||
         (edit.aod && (text.fills.length || text.strokeWeight<2))))
       throw Error('已有路径与计划不同；必须使用声明范围的局部修复');
@@ -322,7 +334,7 @@ async function applyTextAssets(plan, api=figma) {
     }
     component.resize(edit.width,edit.height);component.clipsContent=false;
     componentIds.push(component.id);
-    component.exportSettings=[{format:'PNG',constraint:{type:'SCALE',value:1},suffix:''}];
+    component.exportSettings=cloneAssetValue(assetPngExport);
     text.textAutoResize='NONE';text.resize(edit.text_width,edit.text_height);
     text.textAlignHorizontal='CENTER';text.textAlignVertical='TOP';text.x=edit.text_x;text.y=edit.text_y;
     for(const instance of record.instances) {
