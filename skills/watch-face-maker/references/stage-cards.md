@@ -44,9 +44,19 @@
 
 **操作**：复杂视觉先制作背景主体、主时间和一个关键功能区；在原素材、目标尺寸局部和整盘三个尺度检查轮廓、材质、光影、透明边缘与信息层级。
 
-**产物**：样稿、尝试记录、改进证据和样稿结论。
+**产物**：样稿、尝试记录、改进证据和样稿结论。复用视觉预检生成器，对当前样稿PNG、快照及参考图生成并排、叠图、局部图与逐项评审；这些文件不能只写文字承诺。含全屏背景时，必须同时登记1×背景PNG和background_source，完成[背景边缘证据](visual-preflight.md#背景边缘证据)；框尺寸或FILL正确不能替代有效画面覆盖。
 
-**通过条件**：复杂视觉样稿明确通过；模板或完整原生方案有 `not_applicable` 依据；`prototype` 门禁返回 `0`。
+**通过条件**：复杂视觉样稿的每项视觉结论均有实际证据且为 `pass`，然后封存：
+
+```bash
+uv run --with pillow python "<SKILL_DIR>/scripts/finalize_visual_review.py" \
+  <workflow-contract.json> <样稿评审目录/visual-review.json> --stage prototype \
+  --manifest <audit-manifest.json> --snapshot <样稿快照.json> --exports-dir <样稿PNG目录>
+```
+
+封存自动保存独立的合同、清单、快照、原PNG、参考与对照图副本，并在当前合同登记 `prototype_evidence`；不推进组装或生产验证。再运行统一入口的 `check --gate prototype`，返回 `0` 才能进入组装。模板或完整原生方案可有 `not_applicable` 依据；若声明样稿 `pass`，同样需要封存证据。
+
+组装和视觉预检都必须仍为pending才能封存；已尝试但失败也不能事后补签，先退回受影响阶段。需求、参考契约或路线变化后重评。后续组装使用新的工作文件，保留封存目录；仅推进门禁状态不会使原样稿失效。
 
 **失败处理**：同一路线连续两次无明确改善后切换登记的降级路线；降级失败则设置停止状态，不制作完整状态、AOD或多尺寸版本。
 
@@ -70,7 +80,7 @@
 
 **操作**：用当前快照登记的 `presentation_main` 正式导出运行视觉预检生成器；查看并排图、叠图和局部图；逐条把合同不变量标为 `pass`、`fail` 或 `unverified`，并引用实际证据。全部通过后运行 `finalize_visual_review.py`，一次封存结论、更新合同哈希并将视觉门禁推进为 `pass`。
 
-**产物**：`visual-review.json`、同尺寸并排图、半透明叠图和关键区域局部图。
+**产物**：`visual-review.json`、同尺寸并排图、半透明叠图和关键区域局部图，以及当前background_edge_review及11张边缘证据。
 
 **通过条件**：每条不变量都有证据且为 `pass`；实现图绑定当前快照和正式导出文件；没有构图偏离、素材污染、重叠或关键不变量失败；封存后 `visual_preflight` 门禁返回 `0`。
 

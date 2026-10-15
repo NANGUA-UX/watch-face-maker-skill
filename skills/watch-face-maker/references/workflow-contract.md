@@ -14,6 +14,7 @@
 - `production_routes`：每个区域一项，`primary` 与 `fallback` 从 `figma`、`reference_image_edit`、`approved_asset` 中选择且不能相同。使用参考图编辑时在 `reference_input_hashes` 记录实际直传的参考图哈希。
 - `gates`：固定包含 `intake`、`reference`、`prototype`、`assembly`、`visual_preflight`，状态为 `pending`、`pass`、`fail` 或 `not_applicable`。只有非复杂视觉任务的样稿阶段可用 `not_applicable`。
 - `attempts`：按发生顺序记录 `region`、`route`、`outcome` 和布尔值 `improvement`。`outcome` 为 `pass`、`improved` 或 `failed`。
+- `prototype_evidence`：样稿通过时由封存器写入的回执相对路径与SHA-256，不手工伪造。回执指向项目内独立的合同、清单、快照、原PNG和逐项视觉评审；项目已有project-spec时同时绑定其哈希，并核对快照的文件、页面和分区与已登记Figma目标一致。
 
 ## 门禁语义
 
@@ -22,7 +23,11 @@
 同一区域主路线连续两次 `improvement: false` 后，该区域的下一次尝试必须立即使用登记的降级路线，不能先继续主路线再补一次降级尝试。任何降级尝试（包括提前降级、已有改善后的后续尝试）为 `failed` 时立即将 `status` 改为 `needs_stronger_model_or_human_asset`；后续成功不能覆盖本应停止的失败。门禁继续返回失败，使任务停在可评审状态。
 
 ```bash
-python3 "<SKILL_DIR>/scripts/workflow_guards.py" workflow-contract.json --gate prototype
+uv run --with pillow python "<SKILL_DIR>/scripts/workflow_guards.py" workflow-contract.json --gate prototype
 ```
 
-这是只读合同的底层检查，不绑定project-spec。已建立项目事实的任务必须使用`watch_face.py check <项目目录> --gate prototype`先核对当前需求，再进入合同门禁。返回码 `0` 为通过、`1` 为门禁失败、`2` 为输入结构无效。
+这是只读的底层检查。样稿及以后阶段会复核封存文件、图片派生关系及当前合同需求，不能仅凭gates中的pass通过；后续只改门禁状态不使封存失效，参考、目标、路线或已绑定的项目事实变化则需重评。旧合同缺少封存时不能取得新的样稿或正式通过，不改写历史验收记录。纯模板和完整原生方案的合法not_applicable仍保留，旧项目未提供合同的unverified兼容语义不变。
+
+已建立项目事实的任务必须使用`watch_face.py check <项目目录> --gate prototype`先核对当前需求与确认，再进入证据门禁。返回码 `0` 为通过、`1` 为门禁失败、`2` 为输入结构无效。Python函数gate_failures只检查合同逻辑，CLI与正式校验共用verified_gate_failures复核文件证据。
+
+这些脚本不代理Figma工具调用；它们能拒绝无证据、过期或失败的验收声明，不能阻止绕过入口的直接写入，也不能自动判断审美质量。封存不是用户验收或固件验证。

@@ -46,3 +46,30 @@ uv run --with pillow python "<SKILL_DIR>/scripts/finalize_visual_review.py" \
 - `unverified`：证据缺失、遮挡、分辨率不足或仍需用户判断。
 
 `fail` 和 `unverified` 都不能取得正式生产通过。自动生成图片、文件哈希和结构检查只能证明证据对应当前版本，不能证明视觉已经通过。
+
+## 背景边缘证据
+
+现有命令不变。快照登记config.background_id及该母件1×PNG导出后，生成器自动输出background_edge_review、完整外圈标记图、八方向放大局部和深浅底11图。最终校验与样稿封存都会从当前输入重新计算事实和派生像素；主展示图视觉pass不能替代这项复核。
+
+图片基底在snapshot-extras中登记以下结构，文件路径相对当前exports目录，不允许越界：
+
+```json
+{
+  "background_source": {
+    "source_node_id": "背景母件直属图片节点ID",
+    "source_path": "Source/artwork.png",
+    "coverage_basis": "mask",
+    "valid_region_path": "Source/valid-region.png"
+  }
+}
+```
+
+- coverage_basis为rectangle时，须实际核对源是连续矩形画面；alpha用于真实透明源，不能用于全不透明RGB黑底；mask用于经核对的有效区域灰度图，尺寸与源图一致，白有效、黑无效。
+- source_path保存Figma实际getBytesAsync字节。当前imageHash按导入字节SHA-1核对，另记录SHA-256；源尺寸与Figma images回读一致。字节无法对应时重新保存现场源，不把另一张同尺寸图片冒充实际素材。
+- 图片基底须为背景母件直属RECTANGLE、无额外圆角及兄弟遮罩的无旋转FILL或FIT；覆盖同时与图片节点的实际矩形相交。源到背景的像素变换从真实节点矩阵、源尺寸及填充方式计算并写入证据。可选source_to_background用于核对已有登记，不能覆盖实际回读。非矩形、CROP、旋转、额外遮罩等先在Figma合成统一基底，未经验证不近似换算。
+- 纯原生背景登记background_source为`{"kind":"native"}`，必须完整采集背景子树及实例内部，确认没有图片填充；不能给位图贴原生标签。
+- 局部补边同时提供original_background_path与protected_region_path，均为目标原生尺寸。保护掩膜白色区保留主体，不能为空；实际PNG在保护区各通道差不超过1/255，超出即失败。若源需要重新配准，以已确认锚点为依据，不通过放大掩盖缺口。
+
+自动检查容器、有效画面覆盖及内部透明缺口，最外1px覆盖容差和2px输出alpha带只用于正常抗锯齿，仍须在11图中审看完整外圈；不采用数据安全边距。黑白色本身不判失败：不透明圆外填充由经核对的有效区域和实际边缘图识别，合法黑色、留白和设计边框按参考判断。
+
+实际查看全部边缘证据后，填写background_edge_review.status为pass/fail/unverified及非空notes，其他测量字段和artifacts不手改。来源SHA-256须在清单reference/adopted/reused中登记。容器、有效区域或透明检查失败，边缘证据缺失/过期，或人工结论未验证，都不能取得新通过。旧报告保留原字节；缺少该字段只表示尚未验证，不能补写pass迁移。

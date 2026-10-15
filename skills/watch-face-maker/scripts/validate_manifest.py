@@ -16,7 +16,7 @@ from naming import format_prefix, validate_legacy_names, validate_names
 from run_evidence import safe_path, stable_snapshot, validate_run
 from pointer_checks import validate_pointers, validate_aod_pointers
 from screen_geometry import screen_spec, contains, fit_preview
-from workflow_guards import file_sha256, gate_failures, load_contract
+from workflow_guards import file_sha256, verified_gate_failures, load_contract
 from visual_artifacts import comparison_images
 
 
@@ -1399,6 +1399,11 @@ def validate_pngs(snapshot: dict, exports_dir: Path) -> list[dict]:
                             bright += 1
             ratio = bright / total if total else 0
             checks.append(check_item("exports.aod_brightness", "fail" if ratio > .10 else "pass", f"AOD 实际屏幕可见区域内合成黑底后 RGB>0 的亮像素比例 {ratio:.4%}，阈值 10%", [node["id"]]))
+    if snapshot.get('config', {}).get('background_id'):
+        from background_edges import analyze_background, coverage_status
+        background, _ = analyze_background(snapshot, exports_dir)
+        checks.append(check_item('exports.background_coverage', coverage_status(background),
+            '背景有效区域/透明覆盖检查（不代表边缘视觉通过）：' + str(background['auto_checks'])))
     return checks
 
 
@@ -1500,7 +1505,7 @@ def validate_workflow_binding(
     contract = None
     try:
         contract = load_contract(contract_path)
-        contract_errors.extend(gate_failures(contract, required_gate))
+        contract_errors.extend(verified_gate_failures(contract_path, contract, required_gate))
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         contract_errors.append(str(exc))
 
@@ -1709,6 +1714,18 @@ def validate_workflow_binding(
             ]
             if missing_invariants:
                 visual_errors.append("视觉预检遗漏合同不变量：" + "、".join(missing_invariants))
+
+    if isinstance(snapshot, dict) and snapshot.get('config', {}).get('background_id'):
+        if review is None or exports_dir is None or visual_review_path is None:
+            visual_errors.append('缺少背景边缘复核输入')
+        else:
+            from background_edges import validate_edge_review
+            source_hashes = [value for values in expected_sources.values() for value in values]
+            try:
+                visual_errors.extend(validate_edge_review(snapshot, exports_dir,
+                    review.get('background_edge_review'), visual_review_path.parent, source_hashes))
+            except ImportError:
+                visual_errors.append('缺少Pillow，背景边缘未验证')
 
     visual_check = check_item(
         "workflow.visual_review",

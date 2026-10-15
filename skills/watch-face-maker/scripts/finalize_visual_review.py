@@ -24,6 +24,7 @@ def main() -> int:
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--snapshot", type=Path, required=True)
     parser.add_argument("--exports-dir", type=Path, required=True)
+    parser.add_argument("--stage", choices=('prototype', 'visual_preflight'), default='visual_preflight')
     args = parser.parse_args()
     try:
         contract = load_contract(args.contract)
@@ -37,6 +38,19 @@ def main() -> int:
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         print(f"视觉预检封存输入无效：{exc}")
         return 2
+
+    if args.stage == 'prototype':
+        from prototype_evidence import seal_prototype
+        try:
+            failures = seal_prototype(args, contract, manifest, snapshot, review)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            print(f'样稿封存输入无效：{exc}')
+            return 2
+        if failures:
+            print('样稿不能封存：' + '；'.join(failures))
+            return 1
+        print('样稿已封存，prototype门禁证据可复核；尚未完成生产验证')
+        return 0
 
     checks = validate_workflow_binding(
         manifest, args.contract, args.visual_review, args.snapshot, args.exports_dir,

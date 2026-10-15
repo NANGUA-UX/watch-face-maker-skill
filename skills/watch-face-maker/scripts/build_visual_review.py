@@ -140,6 +140,15 @@ def main() -> int:
             for invariant in contract["reference_contract"]["invariants"]
         ],
     }
+    if snapshot.get('config', {}).get('background_id'):
+        from background_edges import analyze_background
+        edge, edge_images = analyze_background(snapshot, args.exports_dir)
+        edge['artifacts'] = {}
+        for key, edge_image in edge_images.items():
+            path = output / ('background-edge-' + key + '.png')
+            edge_image.save(path)
+            edge['artifacts'][key] = artifact(path)
+        review['background_edge_review'] = edge
     review_path = output / "visual-review.json"
     review_path.write_text(json.dumps(review, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"已生成视觉预检证据：{review_path}")

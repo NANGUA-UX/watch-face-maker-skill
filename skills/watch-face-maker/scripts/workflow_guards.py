@@ -281,6 +281,14 @@ def load_contract(path: Path) -> dict:
     return data
 
 
+def verified_gate_failures(path: Path, contract: dict, gate: str) -> list[str]:
+    failures = gate_failures(contract, gate)
+    if gate in GATE_ORDER[2:] and contract['gates']['prototype'] == 'pass':
+        from prototype_evidence import checkpoint_failures
+        failures.extend(checkpoint_failures(path, contract))
+    return list(dict.fromkeys(failures))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="只读校验表盘工作流合同与阶段门禁")
     parser.add_argument("contract", type=Path)
@@ -292,7 +300,7 @@ def main() -> int:
         print(f"合同结构无效：{exc}")
         return 2
 
-    failures = gate_failures(contract, args.gate)
+    failures = verified_gate_failures(args.contract, contract, args.gate)
     if failures:
         print(f"{args.gate} 门禁失败：")
         for failure in failures:
