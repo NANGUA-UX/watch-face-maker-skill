@@ -58,7 +58,11 @@ def _load_cases(plan_path: Path, suite: dict, field: str) -> dict[str, dict]:
 
 
 def build_fingerprints(contract: dict, manifest: dict, snapshot: dict) -> tuple[str, str]:
-    routes = sorted(contract["production_routes"], key=lambda item: item["region"])
+    routes = sorted(
+        ({key: item[key] for key in ("region", "primary", "fallback")}
+         for item in contract["production_routes"]),
+        key=lambda item: item["region"],
+    )
     families = [
         {"name": family["name"], "kind": family.get("kind"), "count": len(family["node_ids"])}
         for family in snapshot.get("resource_families", [])
@@ -287,36 +291,39 @@ def validate_results(plan_path: Path, results_path: Path) -> list[str]:
         allowed = set(pressure_rubric.get(run.get("case_id"), {}).get("critical_failure_codes", []))
         return set(codes) & allowed
 
-    candidate_failures = sum(
-        run.get("critical_gate_passed") is not True
-        or bool(recorded_critical_codes(run))
-        for run in pressure_candidate
-    )
-    baseline_failures = sum(
-        run.get("critical_gate_passed") is not True
-        or bool(recorded_critical_codes(run))
-        for run in pressure_baseline
-    )
+    def pressure_rating_valid(run: dict) -> bool:
+        passed, codes = run.get("critical_gate_passed"), run.get("failure_codes")
+        allowed = set(pressure_rubric.get(run.get("case_id"), {}).get("critical_failure_codes", []))
+        return (isinstance(passed, bool) and isinstance(codes, list)
+                and all(isinstance(code, str) and code in allowed for code in codes)
+                and passed == (not bool(codes)))
+
+    expected_pressure = len(pressure_prompts) * len(models) * repetitions
+    candidate_unverified = expected_pressure - sum(pressure_rating_valid(run) for run in pressure_candidate)
+    baseline_unverified = expected_pressure - sum(pressure_rating_valid(run) for run in pressure_baseline)
+    candidate_failures = sum(bool(recorded_critical_codes(run)) for run in pressure_candidate)
+    baseline_failures = sum(bool(recorded_critical_codes(run)) for run in pressure_baseline)
     required_rate = plan.get("acceptance", {}).get("candidate_pressure_gate_rate", 1.0)
     candidate_rate = 1 - candidate_failures / len(pressure_candidate) if pressure_candidate else 0
-    if candidate_rate < required_rate:
+    if candidate_unverified:
+        errors.append(f"候选压力评分仍有 {candidate_unverified} 项未验证，无法确认100%关键门禁遵守率")
+    elif candidate_rate < required_rate:
         errors.append(f"候选 Skill 关键门禁遵守率未达到 {required_rate:.0%}（当前 {candidate_rate:.0%}，要求100%）")
-    reduction = 1 - candidate_failures / baseline_failures if baseline_failures else 0
+    if baseline_unverified:
+        errors.append(f"RED 基线评分仍有 {baseline_unverified} 项未验证，无法计算关键失败下降")
     required_reduction = plan.get("acceptance", {}).get("minimum_failure_reduction", 0.8)
-    if baseline_failures == 0:
-        errors.append("RED 基线没有记录关键失败，无法证明候选 Skill 的失败下降")
-    elif reduction < required_reduction:
-        errors.append(f"候选 Skill 关键失败下降 {reduction:.0%}，低于 {required_reduction:.0%}")
+    if not baseline_unverified and not candidate_unverified:
+        reduction = 1 - candidate_failures / baseline_failures if baseline_failures else 0
+        if baseline_failures == 0:
+            errors.append("RED 基线没有记录关键失败，无法证明候选 Skill 的失败下降")
+        elif reduction < required_reduction:
+            errors.append(f"候选 Skill 关键失败下降 {reduction:.0%}，低于 {required_reduction:.0%}")
     low_model = plan.get("acceptance", {}).get("low_tier_model")
-    if any(
-        run.get("model_id") == low_model
-        and (
-            run.get("critical_gate_passed") is not True
-            or bool(recorded_critical_codes(run))
-        )
-        for run in pressure_candidate
-    ):
+    low_runs = [run for run in pressure_candidate if run.get("model_id") == low_model]
+    if any(recorded_critical_codes(run) for run in low_runs):
         errors.append("低档模型仍有关键失败")
+    if sum(pressure_rating_valid(run) for run in low_runs) < len(pressure_prompts) * repetitions:
+        errors.append("低档模型评分仍有未验证，不能确认关键失败归零")
 
     for case_id in pressure_prompts:
         fingerprints = {

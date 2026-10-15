@@ -13,6 +13,8 @@ python3 "<SKILL_DIR>/scripts/watch_face.py" preflight <项目目录> --figma-evi
 
 使用安装了Pillow的Python，或 `uv run --with pillow python`。本地检查与Figma现场检查分别列出；连接、字体或权限无真实证据时为 `unverified`。新建不要求尚未建立的Active/AOD/缩略图ID。`create`走完整工作流；`modify/organize`按变更影响接续，需求变化的合同门禁重新置为pending；`audit`永不允许写入。
 
+`init`允许目录中已有需求输入、参考素材和建文件回执，并保留原始字节；已有项目事实、合同、清单、采集配置或验证证据（含其临时文件）时拒绝初始化，使用`import`或既有项目命令，不覆盖历史记录。显式`--operation`仅覆盖待写入事实，不改原需求文件；`audit`在写入前停止。初始化仍只建立待完成模板，不提升任何门禁。
+
 现场证据来自Figma只读采集，字段为 `origin:figma_readonly`、`capture_signature`、`file_key`、`target_id`、`nodes`、`fonts`、`source_fonts`、`libraries`、`permissions`。字体必须有实际family/style；原生TEXT样式来源登记 `source_fonts[节点ID]`。声明的组件库逐个记录 `key` 与真实 `accessible` 结果。不能因读到目标而写 `write:true`。
 
 写权限依据只能复用已有成功写入或建文件响应，不试写节点探测权限。将工具返回JSON内容原样保存到项目内，`permissions.basis`登记 `kind:successful_write|file_creation`、`file_key`、`receipt_path`、文件真实SHA-256。成功写入响应需含 `changedNodeIds`，basis内 `changed_node_ids`逐项相同；建文件响应需含 `file_key/file_url`。`confirmations.write_scope:true`和 `scope.node_ids`来自用户已授权的范围。审核只需要读取证据。

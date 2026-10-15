@@ -103,8 +103,13 @@ def init(root, spec):
     errors = validate_spec(spec)
     if errors:
         return dict(exit_code=2, errors=errors)
-    if spec['operation'] == 'audit' or (root.exists() and any(root.iterdir())):
-        return dict(exit_code=1, errors=['审核不建立文件，或目标目录已含文件；请使用import或只读命令'])
+    if spec['operation'] == 'audit':
+        return dict(exit_code=1, errors=['审核不建立文件；请使用只读命令'])
+    protected = {*VIEWS.values(), *ARTIFACTS.values(), 'project-spec.json', 'project-state.json'}
+    protected |= {name+'.tmp' for name in protected}
+    existing = sorted(name for name in protected if (root/name).exists() or (root/name).is_symlink())
+    if existing:
+        return dict(exit_code=1, errors=['目标已有项目文件或证据；请使用import或只读命令：'+', '.join(existing)])
     views, fields = templates(), derived(spec)
     for key in views:
         for path, value in fields[key].items():
@@ -280,7 +285,10 @@ def main():
         if args.command == 'init':
             if not args.input:
                 raise ValueError('init需要--input结构化需求')
-            result = init(root, read(args.input))
+            spec = read(args.input)
+            if args.operation:
+                spec['operation'] = args.operation
+            result = init(root, spec)
         elif args.command == 'import':
             if not args.operation:
                 raise ValueError('import需要--operation明确操作类型')
