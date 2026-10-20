@@ -11,6 +11,10 @@ async function collectSnapshot(config) {
   if (missing.length) throw new Error(`缺少配置：${missing.join(", ")}`);
   const profile = config.profile || "full";
   if (!["full", "validation", "preflight"].includes(profile)) throw new Error("未知采集模式");
+  const strokeIds = config.stroke_geometry_node_ids || [];
+  if (!Array.isArray(strokeIds) || strokeIds.some(id => typeof id !== 'string' || !id)
+      || new Set(strokeIds).size !== strokeIds.length) throw new Error('描边路径采集ID须为无重复字符串数组');
+  const strokePaths = new Set(strokeIds);
 
   const section = await figma.getNodeByIdAsync(config.section_id);
   if (!section) throw new Error(`找不到 section：${config.section_id}`);
@@ -192,6 +196,9 @@ async function collectSnapshot(config) {
       if ("strokeWeight" in node) record.stroke_weight = plain(node.strokeWeight);
       if ("strokeAlign" in node) record.stroke_align = plain(node.strokeAlign);
       record.content_signature = hashText(nodeContent(node, refsBefore)).toString(16);
+      if (profile === 'validation' && strokePaths.has(node.id)) {
+        for (const key of ['vectorPaths', 'vectorNetwork']) if (key in node) record[key] = plain(node[key]);
+      }
     }
     const recordBytes = byteLength(record);
     if (bytes + recordBytes > byteLimit) {

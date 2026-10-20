@@ -1,6 +1,7 @@
 """复核已确认制作决策与原始节点；不写Figma，不推断图标语义或审美。"""
 import math
 from pointer_checks import _screen_transform, transform_at
+from stroke_geometry import validate_stroke_geometry
 
 
 def check(name, errors, unknown, explanation):
@@ -84,18 +85,19 @@ def native_progress(s,nodes,capability_modes=None):
         if not n or n.get('type')!='COMPONENT':errors.append(str(id)+':示意母件缺失');continue
         if visible(n,s.get('config',{}).get('asset_board_id'),nodes) is not True:errors.append(id+':示意母件不可见或不在资源分区')
         if id not in source_only or n.get('export_settings'):errors.append(id+':原生示意不得作为PNG导出')
-        descendants=[];stack=[id]
-        while stack:
-            parent=stack.pop()
-            children=[child for child in nodes.values() if child.get('parent_id')==parent]
-            descendants.extend(children);stack.extend(child['id'] for child in children)
-        if shape=='arc':
-            arcs=[child for child in descendants if child.get('type')=='ELLIPSE' and isinstance(child.get('arcData'),dict)]
-            if not arcs:errors.append(id+':缺少可编辑圆弧几何')
-        elif shape=='linear':
-            geometry=[child for child in descendants if child.get('type') in {'RECTANGLE','FRAME'} and node_box(child)]
-            if not geometry:errors.append(id+':缺少可编辑线性几何')
-        else:errors.append(id+':shape必须为arc或linear')
+        if shape not in ('arc','linear'):errors.append(id+':shape必须为arc或linear')
+        geometry=s.get('stroke_geometry')
+        if geometry is None:unknown.append(id+':缺少描边几何证据')
+        elif not isinstance(geometry,list):errors.append(id+':描边几何清单无效')
+        else:
+            related=[g for g in geometry if isinstance(g,dict) and isinstance(g.get('root_id'),str) and g.get('role')=='progress'
+                     and g.get('shape') in (('arc','circle') if shape=='arc' else ('linear',))
+                     and under(nodes.get(g.get('root_id')),id,nodes)]
+            if not related:errors.append(id+':原生进度没有关联实际描边路径')
+            else:
+                checked=validate_stroke_geometry(s,nodes,related)
+                if checked['status']=='fail':errors.extend(id+':'+v for v in checked['locations'])
+                elif checked['status']!='pass':unknown.extend(id+':'+v for v in checked['locations'])
         if not isinstance(entry.get('framework_capability_source'),str) or not entry.get('framework_capability_source').strip():unknown.append(id+':缺少框架能力来源')
     return check('native_progress',sorted(set(errors)),sorted(set(unknown)),'核对原生连续进度示意母件、可编辑几何及非PNG交付属性；不代表固件接入或真机通过')
 
@@ -224,4 +226,4 @@ def resource_ownership(s,nodes):
 
 def validate_delivery_guards(snapshot,capability_modes=None):
     nodes={n['id']:n for n in snapshot.get('nodes',[])}
-    return [fn(snapshot,nodes) for fn in (icon_orientation,state_layout,pointer_annotations,resource_ownership,resource_board_layout)] + [native_progress(snapshot,nodes,capability_modes)]
+    return [fn(snapshot,nodes) for fn in (icon_orientation,state_layout,pointer_annotations,resource_ownership,resource_board_layout)] + [validate_stroke_geometry(snapshot,nodes),native_progress(snapshot,nodes,capability_modes)]
