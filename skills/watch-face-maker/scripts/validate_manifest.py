@@ -8,7 +8,7 @@ from collections import Counter
 from datetime import datetime, timezone
 import json
 import math
-from delivery_guards import validate_delivery_guards
+from delivery_guards import validate_delivery_guards, verified_family_exports
 import re
 import sys
 from pathlib import Path
@@ -874,13 +874,15 @@ def validate_snapshot(snapshot: dict, capability_modes: dict | None = None) -> l
     invalid_source_only = sorted(source_only_ids - {node["id"] for node in board_components})
     asset_items = [item for item in export_items if isinstance(item, dict) and item.get("role") in {"asset", "aod_full", "presentation_main"}]
     asset_ids = {item.get("node_id") for item in asset_items}
-    expected_asset_ids = {node["id"] for node in board_components} - source_only_ids
+    resource_master_ids = {node["id"] for node in board_components} - source_only_ids
+    family_exports = verified_family_exports(snapshot, nodes_by_id)
+    expected_asset_ids = {family_exports.get(identity, identity) for identity in resource_master_ids}
     uncovered = sorted(expected_asset_ids - asset_ids)
     item_errors.extend(f"未映射的目标资源:{i['node_id']}" for i in asset_items if i.get("role") == "asset" and i["node_id"] not in expected_asset_ids)
     wrong_paths = [item.get("node_id") for item in asset_items if item.get("node_id") in expected_asset_ids and nodes_by_id.get(item.get("node_id"), {}).get("name", "") + ".png" != item.get("path")]
-    components = [node for node in board_components if node["id"] in expected_asset_ids]
-    duplicate_names = sorted(name for name, count in Counter(node.get("name") for node in components).items() if name and count > 1)
-    checks.append(check_item("snapshot.component_names", "fail" if duplicate_names else "pass", "正式资产板母件存在重复名" if duplicate_names else "正式资产板母件名称唯一；实例重名不计", duplicate_names))
+    components = [node for node in board_components if node["id"] in resource_master_ids]
+    duplicate_names = sorted(name for name, count in Counter(nodes_by_id[identity].get("name") for identity in expected_asset_ids).items() if name and count > 1)
+    checks.append(check_item("snapshot.component_names", "fail" if duplicate_names else "pass", "正式导出资源存在重复名" if duplicate_names else "正式导出资源名称唯一；展示实例重名不计", duplicate_names))
     enabled_source_exports = [f"非交付源仍开启PNG导出:{node['id']}" for node in board_components if node["id"] in source_only_ids and png_export(node)]
     missing_exports = item_errors + invalid_source_only + enabled_source_exports + [f"未覆盖:{node_id}" for node_id in uncovered] + [f"路径不匹配:{node_id}" for node_id in wrong_paths] + [node["id"] for node in formal_nodes if not png_export(node)]
     checks.append(check_item("snapshot.component_exports", "fail" if missing_exports else "pass", ("正式导出项不完整或缺少 PNG 导出设置：" + ", ".join(missing_exports)) if missing_exports else f"资产板母件 {len(board_components)} 个，正式导出 {len(expected_asset_ids)} 个，source_only {len(source_only_ids)} 个，覆盖完整且均含 PNG 导出设置", missing_exports))
@@ -907,7 +909,7 @@ def validate_snapshot(snapshot: dict, capability_modes: dict | None = None) -> l
         duplicate_indices = sorted(index for index, count in Counter(indices).items() if count > 1)
         duplicate_state_names = sorted(value for value, count in Counter(names).items() if count > 1)
         invalid_suffixes = sorted(value for value in suffixes if not re.fullmatch(rf"\d{{{width}}}", value))
-        not_exported = sorted(node["id"] for node in matched if node["id"] not in asset_ids)
+        not_exported = sorted(node["id"] for node in matched if family_exports.get(node["id"], node["id"]) not in asset_ids)
         state_summaries.append(f"{name}:期望 {expected}，实际 {len(matched)}")
         if len(matched) != expected or missing_indices:
             state_failures.append(f"{name} 缺号 {missing_indices}，实际 {len(matched)}/{expected}")
@@ -965,7 +967,7 @@ def validate_snapshot(snapshot: dict, capability_modes: dict | None = None) -> l
     active_ids = descendants(nodes_by_id, config['active_id'])
     for n in (nodes_by_id[i] for i in active_ids if nodes_by_id[i].get('type') == 'INSTANCE'):
         if not any(nodes_by_id[i].get('type') == 'INSTANCE' for i in descendants_up(n,nodes_by_id,config['active_id'])):
-            if n.get('main_component_id') not in expected_asset_ids | source_only_ids:
+            if n.get('main_component_id') not in resource_master_ids | source_only_ids:
                 instance_checks.append(n['id'])
     aod_ids = descendants(nodes_by_id, config["aod_id"])
     aod_instances = [node for node in nodes if node.get("id") in aod_ids and node.get("type") == "INSTANCE"]
@@ -1078,6 +1080,7 @@ def validate_snapshot(snapshot: dict, capability_modes: dict | None = None) -> l
 
     # Pair by actual character, including separators; never infer equality from the displayed time alone.
     time_style = snapshot.get("aod_style", {})
+    declared_dark = {i for f in snapshot.get("resource_families", []) if f.get("aod") is True and f.get("kind") in ("time", "time_hour", "time_minute", "second") for i in f.get("node_ids", [])}
     pair_failures, pair_unknown, time_pairs, time_groups = [], [], {}, []
     if "time_asset_pairs" in snapshot:
         entries = snapshot["time_asset_pairs"]
@@ -1103,8 +1106,8 @@ def validate_snapshot(snapshot: dict, capability_modes: dict | None = None) -> l
                 if char in paired[i]: pair_failures.append(master["id"]+":重复时间字符")
                 paired[i][char] = master
             if len(chars) == 2 and chars[0] != chars[1]: pair_failures.append(str(entry)+":字符不匹配")
-        declared_dark = {i for f in snapshot.get("resource_families", []) if f.get("aod") is True and f.get("kind") in ("time", "time_hour", "time_minute", "second") for i in f.get("node_ids", [])}
-        if not declared_dark.issubset(seen): pair_failures.append("已声明的AOD时间族未完整配对")
+        dark_side = {entry.get('aod_id') for entry in entries if isinstance(entry, dict)}
+        if not declared_dark.issubset(dark_side): pair_failures.append("已声明的AOD时间族须完整位于配对的aod_id侧")
         for prefixes, paired in groups.items():
             for prefix, members in zip(prefixes, paired):
                 actual = {n["id"] for n in board_components if n.get("name", "").rpartition("/")[0] == prefix}
@@ -1273,19 +1276,41 @@ def validate_snapshot(snapshot: dict, capability_modes: dict | None = None) -> l
         role_geometries[role_name] = tuple(round(value, 3) for value in (local[0], local[1], role_node["width"], role_node["height"]))
         role_locations.append(f"{role_name}:{local[0]},{local[1]},{role_node['width']}x{role_node['height']}")
         role_text = [nodes_by_id[node_id] for node_id in descendants(nodes_by_id, role_node["id"]) if node_id != role_node["id"] and "characters" in nodes_by_id[node_id] and effectively_visible(nodes_by_id[node_id], nodes_by_id, role_node["id"])]
+        role_text.sort(key=lambda item: (node_origin(item) or (math.inf, math.inf))[0])
+        order_known = True
         order_key = role_name.replace("_id", "_order")
         if order_key in roles:
             order = roles[order_key]
             actual_ids = {n["id"] for n in role_text}
             if not isinstance(order, list) or any(not isinstance(i, str) for i in order) or len(set(order)) != len(order) or set(order) != actual_ids:
                 role_failures.append(order_key+":顺序必须完整覆盖实际可见文字")
+                order_known = False
             else:
                 role_text = [nodes_by_id[i] for i in order]
-        elif len({round((node_origin(n) or (0, 0))[1], 1) for n in role_text}) > 1:
-            role_unverified.append(role_name+":多行时间缺少明确字段顺序")
         else:
-            role_text.sort(key=lambda item: (node_origin(item) or (math.inf, math.inf))[0])
-        role_values[role_name] = "".join(str(item.get("characters", "")) for item in role_text)
+            intervals = []
+            centers, origins, complete_glyphs = [], [], True
+            for node in role_text:
+                origin = node_origin(node)
+                if origin is None or not has_translation_only_transform(node) or not is_finite_number(node.get('height')) or node['height'] <= 0:
+                    order_known = False
+                    break
+                centers.append(origin[1] + node['height'] / 2)
+                origins.append(origin[1])
+                bounds = node.get('unclipped_glyph_bounds') or node.get('glyph_bounds') or node.get('render_bounds')
+                if not isinstance(bounds, dict) or not all(is_finite_number(bounds.get(key)) for key in ('y','height')) or bounds['height'] <= 0:
+                    complete_glyphs = False
+                else:
+                    intervals.append((bounds['y'], bounds['y'] + bounds['height']))
+            if role_text and order_known:
+                if complete_glyphs:
+                    order_known = max(top for top, bottom in intervals) < min(bottom for top, bottom in intervals)
+                else:
+                    order_known = max(origins) - min(origins) <= .001 or max(centers) - min(centers) <= .001
+            if not order_known:
+                role_unverified.append(role_name+":多行或行关系未确定的时间缺少明确字段顺序")
+        if order_known:
+            role_values[role_name] = "".join(str(item.get("characters", "")) for item in role_text)
         if role_node["id"] not in descendants(nodes_by_id, owner_id) or local[0] < 0 or local[1] < 0 or local[0] + role_node["width"] > owner.get("width", 0) or local[1] + role_node["height"] > owner.get("height", 0):
             role_failures.append(role_node["id"])
     if roles and len(role_values) == 2 and (not all(role_values.values()) or role_values["time_main_id"] != role_values["time_aod_id"]):
@@ -1303,15 +1328,19 @@ def validate_snapshot(snapshot: dict, capability_modes: dict | None = None) -> l
     style_failures, style_unknown = [], []
     masters = [node for node in board_components if isinstance(prefix, str) and prefix and node.get("name", "").startswith(prefix)]
     if isinstance(snapshot.get("time_asset_pairs"), list):
-        dark_ids = {e.get("aod_id") for e in snapshot["time_asset_pairs"] if isinstance(e, dict)}
+        dark_ids = {e.get("aod_id") for e in snapshot["time_asset_pairs"] if isinstance(e, dict)} | declared_dark
         masters = [node for node in board_components if node["id"] in dark_ids]
     aod_time = nodes_by_id.get(roles.get("time_aod_id")) if isinstance(roles, dict) else None
     targets = set()
     for master in masters:
-        targets.update(descendants(nodes_by_id, master["id"]))
+        source_texts = {identity for identity in descendants(nodes_by_id, master['id'])
+                        if nodes_by_id[identity].get('type') == 'TEXT' and effectively_visible(nodes_by_id[identity], nodes_by_id, master['id'])}
+        if not source_texts:
+            style_unknown.append(master['id']+':缺少可核对的母件文字')
+        targets.update(source_texts)
     display_ids = descendants(nodes_by_id, aod_time["id"]) if aod_time else set()
-    targets.update(display_ids)
-    texts = [node for node in nodes if node["id"] in targets and node.get("type") == "TEXT" and effectively_visible(node, nodes_by_id, config["section_id"])]
+    targets.update(identity for identity in display_ids if effectively_visible(nodes_by_id[identity], nodes_by_id, config['section_id']))
+    texts = [node for node in nodes if node["id"] in targets and node.get("type") == "TEXT"]
     if not masters or not any(node["id"] in display_ids for node in texts) or not re.fullmatch(r"#[0-9A-Fa-f]{6}", color):
         style_unknown.append("缺少描边样式要求、母件或实际显示文字")
     if re.fullmatch(r"#[0-9A-Fa-f]{6}", color):

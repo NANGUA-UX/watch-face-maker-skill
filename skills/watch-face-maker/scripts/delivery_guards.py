@@ -197,6 +197,7 @@ def resource_ownership(s,nodes):
     decisions=s.get('resource_ownership',[]);config=s.get('config',{})
     bg=config.get('background_id');roots=[config.get(k) for k in ('active_id','aod_id')]
     exported={i.get('node_id') for i in s.get('export_items',[])};source_only=set(s.get('source_only_node_ids',[]))
+    family_exports=verified_family_exports(s,nodes)
     if not decisions:unknown.append('缺少逐元素拆分决定与母件对应关系')
     for d in decisions:
         id=d.get('master_id','未指定母件');n=nodes.get(id)
@@ -220,7 +221,8 @@ def resource_ownership(s,nodes):
             elif any(visible(i,config.get('section_id',bg),nodes) is not True for i in in_bg):errors.append(id+':背景源实例不可见或祖先缺失')
         else:
             if behavior=='static' and not d.get('independent_behavior'):unknown.append(id+':静态资源独立行为未说明')
-            if id in source_only or id not in exported or not n.get('export_settings'):errors.append(id+':独立资源未正式导出')
+            export_id=family_exports.get(id,id)
+            if id in source_only or export_id not in exported or not nodes.get(export_id,{}).get('export_settings'):errors.append(id+':独立资源未正式导出')
             if in_bg:errors.append(id+':独立变化内容同时固定在背景')
     return check('resource_ownership',errors,unknown,'交叉核对已确认逐元素行为、背景源实例、展示引用、source_only与正式导出；不按模块动态性推断图标')
 
@@ -265,6 +267,27 @@ def family_exportability(s,nodes):
             if master not in members:errors.append(id+':母件不属于所声明资源族')
             elif master in covered:errors.append(id+':同一成员有多个导出节点')
             else:covered.add(master)
+            if n.get('type')=='INSTANCE' and master in nodes:
+                dimensions=[v for key in ('width','height') for v in (n.get(key),nodes[master].get(key))]
+                if any(isinstance(v,bool) or not isinstance(v,(int,float)) or not math.isfinite(v) or v<=0 for v in dimensions):
+                    unknown.append(id+':缺少实例与母件实际尺寸')
+                elif any(abs(n[key]-nodes[master][key])>.001 for key in ('width','height')):
+                    errors.append(id+':导出实例尺寸与母件不一致')
+                transforms=[node.get('absolute_transform') for node in (n,nodes[master])]
+                if any(not isinstance(t,list) or len(t)!=2 or any(not isinstance(row,list) or len(row)!=3 or any(isinstance(v,bool) or not isinstance(v,(int,float)) or not math.isfinite(v) for v in row) for row in t) for t in transforms):
+                    unknown.append(id+':缺少导出实例与母件的实际绝对变换')
+                elif any(abs(transforms[0][row][column]-transforms[1][row][column])>.001 for row in range(2) for column in range(2)):
+                    errors.append(id+':导出实例方向与母件不一致')
+                overrides=n.get('overrides')
+                if not isinstance(overrides,list):unknown.append(id+':缺少导出实例原始覆盖记录')
+                else:
+                    for override in overrides:
+                        if not isinstance(override,dict) or not isinstance(override.get('id'),str) or not isinstance(override.get('overriddenFields'),list):
+                            unknown.append(id+':导出实例覆盖记录不完整');continue
+                        fields=override['overriddenFields']
+                        allowed={'name','exportSettings','x','y','relativeTransform'} if override['id']==id else set()
+                        if any(not isinstance(field,str) or field not in allowed for field in fields):
+                            errors.append(id+':导出实例含内容或内部几何覆盖，不能代替共享母件')
             node_name=n.get('name')
             if not isinstance(node_name,str) or not node_name:errors.append(id+':缺少资源名称')
             elif node_name in used_names:errors.append(id+':本区资源重名')
@@ -282,6 +305,18 @@ def family_exportability(s,nodes):
             if selected is None or selected not in settings:errors.append(id+':缺少明确匹配的PNG导出设置')
         for id in set(members)-covered:errors.append(name+':缺少本区可导出成员 '+id)
     return check('family_exportability',sorted(set(errors)),sorted(set(unknown)),explanation)
+
+
+def verified_family_exports(s,nodes):
+    """仅复用整族已验证的本区导出映射；旧缺证清单保持原行为。"""
+    if family_exportability(s,nodes)['status']!='pass':return {}
+    exports={}
+    for family in s['resource_families']:
+        for identity in family['export_node_ids']:
+            node=nodes[identity]
+            master=node['main_component_id'] if node['type']=='INSTANCE' else identity
+            exports[master]=identity
+    return exports
 
 
 def validate_delivery_guards(snapshot,capability_modes=None):

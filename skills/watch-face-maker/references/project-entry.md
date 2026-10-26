@@ -21,6 +21,8 @@ python3 "<SKILL_DIR>/scripts/watch_face.py" preflight <项目目录> --figma-evi
 
 已有写权限依据继续复用成功写入或建文件响应，不能因回执失效退回首次制作通道。将工具返回JSON内容原样保存到项目内，`permissions.basis`登记 `kind:successful_write|file_creation`、`file_key`、`receipt_path`、文件真实SHA-256。成功写入响应需含 `changedNodeIds`，basis内 `changed_node_ids`逐项相同；建文件响应需含 `file_key/file_url`。`confirmations.write_scope:true`和 `scope.node_ids`来自用户已授权的范围。审核只需要读取证据。
 
+合同处于`needs_stronger_model_or_human_asset`时优先停止正式制作：无论技术写权限是否已证实，`write_ready/routing.write_allowed`均为false，检查返回1并提示只读等待；首次必要制作不能覆盖此停止条件。普通pending门禁不等于全局停止，阶段制作仍按现场条件判断。
+
 ## 同步与旧项目
 
 ```bash
@@ -34,6 +36,8 @@ python3 "<SKILL_DIR>/scripts/watch_face.py" check <项目目录> --json
 `import`只新增事实和同步基线，不改旧文件，不从尺寸正确推断用户确认。跨文件尺寸和来源策略冲突需要在project-spec中明确选值，并记录对应的 `confirmations.target/source_strategy:true`后再同步；未解决时整个同步停止。旧能力模式和来源限制完整保留。未知显示名称不抹掉旧切图前缀。
 
 `sync`显示修改字段，只更新尺寸、能力选择、来源策略、名称前缀和目标ID等需求派生项。人工编辑了已维护字段且与事实冲突时整次停止；测量、数量、PNG哈希、导出设置、显示节点ID和验收结论不属于同步内容。重复运行零改动。`project-state.json`保存同步基线与过期项，不能充当证据或确认来源。
+
+删除此前由同步维护的`capability_presentations`时，只有实际值仍与旧owned基线一致才清理；外部修改仍按冲突停止整次同步。旧导入项目从未维护此字段时不新增或删除其显示含义。
 
 事实变化标记旧证据过期并重置合同门禁，原快照、报告和导出回执保留。`status`只读；合同标签或视觉通过不能证明生产通过。当前报告必须绑定现有文件哈希，并重新调用原正式校验器。统一入口的默认证据文件为 `snapshot.json/evidence.json/visual-review.json/report.json`，PNG目录为 `exports`；已有项目采用其他名称时保留原文件，通过 `status/check --snapshot <原快照> --evidence <原回执> --visual-review <原视觉记录> --report <原报告> --exports-dir <原PNG目录>`显式传参。
 

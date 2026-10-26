@@ -173,14 +173,23 @@ def sync(root, spec, state):
     for key, mapping in fields.items():
         path = inside(root, state['views'][key])
         obj = read(path) if path.is_file() else templates()[key]
+        owned = state.get('owned', {}).get(key, {})
         for field, value in mapping.items():
-            old = state.get('owned', {}).get(key, {}).get(field)
+            old = owned.get(field)
             actual = get(obj, field)
             if actual != old and actual != value:
                 conflicts.append(dict(file=path.name, field=field, previous=old, actual=actual, requested=value))
             elif actual != value:
                 put(obj, field, value)
                 changes.append(dict(file=path.name, field=field, value=value))
+        if key == 'manifest' and 'capability_presentations' in owned and 'capability_presentations' not in mapping:
+            field = 'capability_presentations'
+            if field in obj:
+                if obj[field] != owned[field]:
+                    conflicts.append(dict(file=path.name, field=field, previous=owned[field], actual=obj[field], requested=None))
+                else:
+                    del obj[field]
+                    changes.append(dict(file=path.name, field=field, removed=True))
         updates[path] = obj
     if conflicts:
         return dict(exit_code=1, conflicts=conflicts, changes=[])
@@ -275,8 +284,13 @@ def status(root, spec, state, artifacts=None, exports_dir='exports', *, validate
 def phase_state(root, spec, state, result, current, figma_evidence):
     """所有只读入口共用同一阶段卡，命令退出码仍各自表示其检查结果。"""
     contract = read(inside(root, state['views']['workflow_contract']))
+    stopped = contract.get('status') == 'needs_stronger_model_or_human_asset'
+    stop_step = '已停止正式制作，等待更强模型或人工素材；仅继续只读评审现有证据'
     live = preflight(spec, remote_evidence(root, figma_evidence))
     details = list(live.get('blocker_details', []))
+    if stopped:
+        details.append(dict(id='workflow.stop', category='unsupported',
+                            explanation='降级路线仍失败，已停止正式制作，等待更强模型或人工素材', next_step=stop_step))
     for index, explanation in enumerate(current.get('blockers', [])):
         if any(v['explanation'] == explanation for v in details):
             continue
@@ -301,7 +315,7 @@ def phase_state(root, spec, state, result, current, figma_evidence):
         'assembly':'完成Main/AOD/Preview实际组装及受影响资源后执行check --gate assembly',
         'visual_preflight':'核对真实导出与逐项视觉评审后执行check --gate visual_preflight',
     }
-    if stage in stage_actions:
+    if stage in stage_actions and not stopped:
         contract_path = inside(root, state['views']['workflow_contract'])
         try:
             failures = verified_gate_failures(contract_path, load_contract(contract_path), stage)
@@ -310,8 +324,10 @@ def phase_state(root, spec, state, result, current, figma_evidence):
         details.extend(dict(id='stage.'+stage, category='implementation_error', explanation=v,
                             next_step=stage_actions[stage]) for v in failures)
     requirements = requirement_blockers(spec, state, contract)
-    write_ready = live.get('write_ready', False) and not requirements
-    if requirements:
+    write_ready = live.get('write_ready', False) and not requirements and not stopped
+    if stopped:
+        next_step = stop_step
+    elif requirements:
         next_step = next((v['next_step'] for v in details if v['explanation'] == requirements[0]), '核对项目事实与合同后执行sync')
     elif write_ready:
         next_step = ('完成'+stage+'阶段条件并执行check --gate '+stage+'；需要制作时仅在授权范围内执行，成功后保存真实响应并重新preflight'
@@ -320,7 +336,7 @@ def phase_state(root, spec, state, result, current, figma_evidence):
         next_step = '只读评审'+stage+'阶段证据；补齐正式事实后再执行check'
     else:
         next_step = live.get('next_step', '重新执行preflight核对制作条件')
-    if current['production_ready']:
+    if current['production_ready'] and not stopped:
         next_step = '等待用户验收与固件验证'
     shared = dict(stage=stage, gates=contract.get('gates', {}),
                   write_ready=write_ready, permissions=live.get('permissions', 'unverified'),
@@ -328,8 +344,8 @@ def phase_state(root, spec, state, result, current, figma_evidence):
                   blocker_details=details, next_step=next_step)
     if 'routing' in result:
         result['routing']['write_allowed'] = write_ready
-        if requirements:
-            result['exit_code'] = 1
+    if requirements or stopped:
+        result['exit_code'] = 1
     result.update(shared)
     result['phase_state'] = copy.deepcopy(shared)
     return result

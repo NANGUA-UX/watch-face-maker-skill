@@ -24,6 +24,17 @@ def transform_at(pivot, center, angle):
     return [[c, -s, cx-c*px+s*py], [s, c, cy-s*px-c*py]]
 
 
+def pointer_instance_size_status(instance, master):
+    dimensions = [instance.get(key) for key in ('width', 'height')]
+    if any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
+           for value in dimensions):
+        return 'unverified', '缺少指针实例原始有效尺寸'
+    if any(value <= 0 or abs(value - master.get(key, 0)) > .001
+           for key, value in zip(('width', 'height'), dimensions)):
+        return 'fail', '指针实例尺寸与母件不一致，缩放后的轴心和扫过边界尚未支持'
+    return 'pass', ''
+
+
 def _screen_transform(node, nodes, roots):
     """复合到Active/AOD局部坐标，排除其在编辑画布上的位置。"""
     transform = node.get('relative_transform')
@@ -68,6 +79,14 @@ def validate_pointers(snapshot, pointers, canvas=(480, 480), safe_margin=4, shap
             errors.append(f"指针局部轴心或屏幕轴心不是整数像素：{master['id']}")
         if not (w > 0 and h > 0 and w % 2 == h % 2 == 0 and 0 <= px <= w and 0 <= py <= h):
             errors.append(f"指针尺寸或局部轴心无效：{master['id']}")
+        size_status, size_detail = pointer_instance_size_status(n, master)
+        if size_status == 'fail':
+            errors.append(f"{size_detail}：{n['id']}")
+            continue
+        if size_status == 'unverified':
+            measured.append({'id': n['id'], 'pivot_error': None, 'sweep_radius': None,
+                             'sweep_status': 'unverified'})
+            continue
         transform, screen_root, layer_id = _screen_transform(n, nodes, roots)
         if not transform:
             errors.append(f"指针缺少实际变换或完整祖先链：{n['id']}")

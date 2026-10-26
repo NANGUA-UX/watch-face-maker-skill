@@ -1,7 +1,7 @@
 """只对可由原始几何重建的节点保留精度；不豁免其子树。"""
 import math
 
-from pointer_checks import transform_at
+from pointer_checks import pointer_instance_size_status, transform_at
 
 TOLERANCE = .001
 IDENTITY = [[1, 0, 0], [0, 1, 0]]
@@ -57,6 +57,9 @@ def _pointer(pointer, nodes, roots):
     width, height = master.get('width'), master.get('height')
     if not all(_number(v) and v > 0 and v % 2 == 0 for v in (width, height)) or not (0 <= pivot[0] <= width and 0 <= pivot[1] <= height):
         return set(), 'fail', '母件尺寸或局部轴心无效'
+    size_status, size_detail = pointer_instance_size_status(node, master)
+    if size_status != 'pass':
+        return set(), size_status, size_detail
     chain, seen, current = [], set(), node
     while current and current['id'] not in roots:
         if current['id'] in seen or not _matrix(current.get('relative_transform')):
@@ -96,6 +99,14 @@ def _bounds(points):
     return low + [max(point[r] for point in points) - low[r] for r in range(2)]
 
 
+def _raw_alias(node, normalized, native):
+    if normalized in node and native in node:
+        a, b = node[normalized], node[native]
+        if a != b or isinstance(a, bool) != isinstance(b, bool):
+            return None
+    return node.get(normalized, node.get(native))
+
+
 def _radial(entry, nodes):
     """窄支持：完整圆环与刚体径向直线。其他构造保留未验证，不近似放行。"""
     root, intersect, union, ring = [nodes.get(entry.get(key)) for key in
@@ -132,28 +143,30 @@ def _radial(entry, nodes):
     local = {}
     for node in group:
         local[node['id']] = [[*node['absolute_transform'][r][:2], node['absolute_transform'][r][2] - origin[r]] for r in range(2)]
-    diameter, weight, arc = ring.get('width'), ring.get('stroke_weight'), ring.get('arcData')
+    diameter, weight, arc = ring.get('width'), _raw_alias(ring, 'stroke_weight', 'strokeWeight'), ring.get('arcData')
+    align = _raw_alias(ring, 'stroke_align', 'strokeAlign')
     if not arc or not all(_number(arc.get(key)) for key in ('startingAngle', 'endingAngle', 'innerRadius')):
         return set(), 'unverified', '缺少源圆环原始arcData'
-    if not all(_number(v) for v in (diameter, weight, ring.get('height'))) or any(key not in ring for key in ('fills', 'strokes', 'stroke_align')):
+    if not all(_number(v) for v in (diameter, weight, ring.get('height'))) or align is None or any(key not in ring for key in ('fills', 'strokes')):
         return set(), 'unverified', '缺少源圆环原始尺寸或描边属性'
     if abs(abs(arc['endingAngle'] - arc['startingAngle']) - 2 * math.pi) > TOLERANCE or arc['innerRadius'] != 0:
         return set(), 'unverified', '非完整源圆环几何尚未覆盖'
     if (diameter <= 0 or not _integer(diameter / 2) or not 0 < weight < diameter / 2
             or ring.get('height') != diameter or ring.get('fills') != [] or not ring.get('strokes')
-            or ring.get('stroke_align') != 'INSIDE'):
+            or align != 'INSIDE'):
         return set(), 'fail', '源圆环不是完整同心向内描边圆'
     radius = diameter / 2
     if not _close(local[ring['id']], [[1, 0, center[0] - radius], [0, 1, center[1] - radius]]):
         return set(), 'fail', '源圆环与声明圆心不一致'
     union_points, intersection_points, weights = [], [], []
     for line, angle in zip(lines, angles):
-        length, stroke = line.get('width'), line.get('stroke_weight')
+        length, stroke = line.get('width'), _raw_alias(line, 'stroke_weight', 'strokeWeight')
+        align = _raw_alias(line, 'stroke_align', 'strokeAlign')
         if not _number(length) or not _number(stroke):
             return set(), 'unverified', '缺少源线长度或实际描边宽度'
-        if any(key not in line for key in ('height', 'strokeCap', 'stroke_align', 'fills', 'strokes')):
+        if align is None or any(key not in line for key in ('height', 'strokeCap', 'fills', 'strokes')):
             return set(), 'unverified', '缺少源线原始形状或描边属性'
-        if line['strokeCap'] != 'NONE' or line['stroke_align'] != 'CENTER':
+        if line['strokeCap'] != 'NONE' or align != 'CENTER':
             return set(), 'unverified', '其他源线端帽或描边对齐尚未覆盖'
         if (line['height'] != 0 or length <= 0 or not 0 < stroke < 2 * radius
                 or line['fills'] != [] or not line['strokes']):
