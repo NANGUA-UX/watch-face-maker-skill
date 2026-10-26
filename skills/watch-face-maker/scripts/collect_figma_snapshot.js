@@ -3,10 +3,11 @@
  * 只读指定 section；分页避免工具输出被截断。
  */
 async function collectSnapshot(config) {
-  const required = [
-    "file_key", "section_id", "asset_board_id", "main_id",
-    "active_id", "aod_id", "preview_id",
-  ];
+  const stage = config?.stage || "production";
+  if (!["prototype", "production"].includes(stage)) throw new Error("未知采集阶段");
+  const required = ["file_key", "section_id", "main_id", "active_id"];
+  const roleKeys = ["section_id", "asset_board_id", "main_id", "active_id", "aod_id", "preview_id"];
+  if (stage === "production") required.push("asset_board_id", "aod_id", "preview_id");
   const missing = required.filter((key) => !config || !config[key]);
   if (missing.length) throw new Error(`缺少配置：${missing.join(", ")}`);
   const profile = config.profile || "full";
@@ -32,6 +33,12 @@ async function collectSnapshot(config) {
     }
   };
   visit(section);
+  // 角色必须是本分区内实际读取的不同节点；样稿不补造派生稿或资源板。
+  const registered = roleKeys.filter(key => config[key]);
+  if (registered.some(key => !seen.has(config[key]))) throw new Error("采集角色不在指定分区内");
+  if (new Set(registered.map(key => config[key])).size !== registered.length) {
+    throw new Error("采集角色不能共用节点ID，禁止主稿冒充AOD或Preview");
+  }
   for (const id of config.shared_master_ids || []) {
     const master = await figma.getNodeByIdAsync(id);
     if (!master || master.type !== "COMPONENT") throw new Error(`共享母件无效：${id}`);
@@ -219,7 +226,8 @@ async function collectSnapshot(config) {
     stability: {before: signature, after: afterSignature, status: "pass", algorithm: "fnv1a32-content-v3"},
     captured_at: new Date().toISOString(),
     capture_signature: signature,
-    config: plain(config),
+    config: plain(Object.fromEntries(Object.entries({...config, stage})
+      .filter(([key, value]) => !roleKeys.includes(key) || value))),
     nodes: records,
     total_nodes: allNodes.length,
     next_offset: nextOffset < allNodes.length ? nextOffset : null,

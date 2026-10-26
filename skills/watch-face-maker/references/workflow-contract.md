@@ -31,3 +31,7 @@ uv run --with pillow python "<SKILL_DIR>/scripts/workflow_guards.py" workflow-co
 已建立项目事实的任务必须使用`watch_face.py check <项目目录> --gate prototype`先核对当前需求与确认，再进入证据门禁。返回码 `0` 为通过、`1` 为门禁失败、`2` 为输入结构无效。Python函数gate_failures只检查合同逻辑，CLI与正式校验共用verified_gate_failures复核文件证据。
 
 这些脚本不代理Figma工具调用；它们能拒绝无证据、过期或失败的验收声明，不能阻止绕过入口的直接写入，也不能自动判断审美质量。封存不是用户验收或固件验证。
+
+代表性样稿使用 `config.stage: "prototype"` 的快照：真实 section、Main、Active 即可开始；资源板尚未建立时可省略，已使用的资源板及已经存在的 AOD/Preview 必须登记真实角色。未创建派生稿时省略对应ID，禁止复用 Main/Active ID 冒充。stage 与 `profile` 是两个字段；样稿通常使用 validation 精度。分页合并、稳定签名与原PNG/视觉证据的封存仍完整执行；preflight、缺页或漂移证据不能封存。已有完整 production 快照仍可用于样稿封存，兼容旧流程。
+
+样稿封存通过后仍须真实制作 AOD、Preview 和完整资源板，使用 production 阶段重新采集及验证。样稿快照只用于参考/样稿复核，不能取得正式结构、视觉预检或生产交付通过；不得手改 stage 把旧封存当作正式快照。

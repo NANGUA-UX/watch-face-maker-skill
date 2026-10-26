@@ -16,6 +16,7 @@ from naming import format_prefix, validate_legacy_names, validate_names
 from run_evidence import safe_path, stable_snapshot, validate_run
 from pointer_checks import validate_pointers, validate_aod_pointers
 from screen_geometry import screen_spec, contains, fit_preview
+from layout_precision import precision_exemptions
 from workflow_guards import file_sha256, verified_gate_failures, load_contract
 from visual_artifacts import comparison_images
 
@@ -28,9 +29,10 @@ STATE_CAPABILITY_TO_FAMILY = {
     "pace_progress": "pace_progress",
     "calories_progress": "calories_progress",
     "distance_progress": "distance_progress",
+    "steps_progress": "steps_progress",
 }
 NATIVE_PROGRESS_CAPABILITIES = {
-    "battery", "pace_progress", "calories_progress", "distance_progress",
+    "battery", "pace_progress", "calories_progress", "distance_progress", "steps_progress",
 }
 
 
@@ -344,6 +346,15 @@ def validate_manifest(data: dict) -> tuple[list[str], dict]:
         if not isinstance(capability_modes, dict):
             errors.append("capability_modes 必须是对象")
             capability_modes = {}
+        presentations = data.get("capability_presentations", {})
+        if not isinstance(presentations, dict):
+            errors.append("capability_presentations 必须是对象")
+            presentations = {}
+        for capability, presentation in presentations.items():
+            if capability != "battery" or capability not in requested or presentation not in ("numeric", "progress"):
+                errors.append(f"无效的能力显示声明：{capability}")
+            if presentation == "numeric" and (capability in capability_modes or capability in states):
+                errors.append(f"{capability} 仅数字显示，不能同时声明图形进度或状态图")
         for capability, mode in capability_modes.items():
             if capability not in requested:
                 errors.append(f"capability_modes 声明了未请求能力：{capability}")
@@ -353,6 +364,8 @@ def validate_manifest(data: dict) -> tuple[list[str], dict]:
                 errors.append(f"{capability} 不支持 native_continuous 实现模式")
         for capability, state_family in STATE_CAPABILITY_TO_FAMILY.items():
             if capability not in requested:
+                continue
+            if presentations.get(capability) == "numeric":
                 continue
             mode = capability_modes.get(capability, "state_images")
             if mode == "state_images" and state_family not in states:
@@ -690,12 +703,16 @@ def validate_target_geometry(snapshot, spec):
 def validate_snapshot(snapshot: dict, capability_modes: dict | None = None) -> list[dict]:
     checks: list[dict] = []
     config = snapshot.get("config") if isinstance(snapshot.get("config"), dict) else {}
+    if config.get("stage") == "prototype":
+        return [check_item("snapshot.production_scope", "unverified", "样稿快照仅证明已建立的角色，不能作为完整生产证据")]
     if config.get("profile") == "preflight" or snapshot.get("evidence_level") == "preflight":
         return [check_item("snapshot.preflight", "unverified", "轻量预检不能作为完整交付证据；设计稳定后采集正式快照")]
     nodes = snapshot.get("nodes") if isinstance(snapshot.get("nodes"), list) else []
     nodes_by_id = {node.get("id"): node for node in nodes if isinstance(node, dict) and node.get("id")}
     required = ("section_id", "asset_board_id", "main_id", "active_id", "aod_id", "preview_id")
     missing = [field for field in required if config.get(field) not in nodes_by_id]
+    if config.get("aod_id") in (config.get("main_id"), config.get("active_id")) or config.get("preview_id") in (config.get("main_id"), config.get("active_id"), config.get("aod_id")):
+        missing.append("AOD/Preview不能使用其他角色的节点别名")
     if snapshot.get("schema_version") not in (1, 2) or missing:
         checks.append(check_item("snapshot.structure", "fail", "快照结构不完整或指定节点缺失", missing))
         return checks
@@ -788,7 +805,7 @@ def validate_snapshot(snapshot: dict, capability_modes: dict | None = None) -> l
         else:
             artwork_roots.add(root["id"])
 
-    pointer_ids = {p.get("instance_id") for p in snapshot.get("pointers", [])}
+    precise_ids, precision_diagnostics = precision_exemptions(snapshot, nodes_by_id)
 
     def check_position(node):
         if node["id"] in visited or node.get("visible") is False:
@@ -796,7 +813,7 @@ def validate_snapshot(snapshot: dict, capability_modes: dict | None = None) -> l
         visited.add(node["id"])
         if not all(is_finite_number(node.get(k)) for k in ("x", "y")):
             position_unknown.append(node["id"])
-        elif node["id"] not in pointer_ids and node.get("parent_id") != config["preview_id"]:
+        elif node["id"] not in precise_ids and node.get("parent_id") != config["preview_id"]:
             decimal_text = snapshot.get("text_geometry") is True and text_source(node, nodes_by_id)
             decimal_digit = snapshot.get("digit_geometry") is True and digit_source(node, nodes_by_id)
             precision = 10 if decimal_text or decimal_digit else 1
@@ -814,6 +831,11 @@ def validate_snapshot(snapshot: dict, capability_modes: dict | None = None) -> l
     else:
         position_unknown.append("未声明整数定位要求")
     checks.append(check_item("snapshot.integer_positions", "fail" if position_failures else ("unverified" if position_unknown else "pass"), f"核对{len(visited)}个原生可见图层的局部X/Y；按已声明的文字或数字规则允许文本一位小数，其余布局保持整数；派生坐标由源组件和缩放保证" if not position_failures else "原生布局位置精度不满足规则", position_failures + position_unknown))
+    relevant = [d for d in precision_diagnostics if d['kind'] == 'pointer' or d['node_id'] in visited]
+    invalid = [d['node_id']+':'+d['detail'] for d in relevant if d['status'] == 'fail']
+    unknown = [d['node_id']+':'+d['detail'] for d in relevant if d['status'] == 'unverified']
+    checks.append(check_item('snapshot.layout_precision', 'fail' if invalid else ('unverified' if unknown else ('pass' if relevant else 'not_applicable')),
+                             '仅以实际轴心、祖先矩阵和径向源结构证明必要的小数几何，不豁免普通后代', invalid+unknown))
     checks.append(validate_digit_geometry(nodes_by_id, baseline_families=snapshot.get('resource_families')) if snapshot.get("digit_geometry") is True else check_item("snapshot.digit_geometry", "unverified", "未声明数字偶数尺寸与一位小数居中规则"))
     checks.append(validate_digit_geometry(nodes_by_id, all_text=True, baseline_families=snapshot.get('resource_families')) if snapshot.get("text_geometry") is True else check_item("snapshot.text_geometry", "unverified", "未声明完整文字切图几何规则，不能用数字检查代替"))
 
@@ -1057,25 +1079,63 @@ def validate_snapshot(snapshot: dict, capability_modes: dict | None = None) -> l
     # Pair by actual character, including separators; never infer equality from the displayed time alone.
     time_style = snapshot.get("aod_style", {})
     pair_failures, pair_unknown, time_pairs, time_groups = [], [], {}, []
-    for key in ("active_node_name_prefix", "node_name_prefix"):
-        prefix = time_style.get(key)
-        group = {}
-        for master in board_components:
-            if not isinstance(prefix, str) or not prefix or not master.get("name", "").startswith(prefix):
-                continue
-            texts = [nodes_by_id[i] for i in descendants(nodes_by_id, master["id"]) if nodes_by_id[i].get("type") == "TEXT"]
-            if len(texts) != 1 or not texts[0].get("characters"):
-                pair_unknown.append(master["id"])
-                continue
-            char = texts[0]["characters"]
-            if char in group:
-                pair_failures.append(f"重复时间字符：{char}")
-            group[char] = master
-        if not group:
-            pair_unknown.append(key)
-        time_groups.append(group)
-    if all(time_groups):
-        active_chars, dark_chars = time_groups
+    if "time_asset_pairs" in snapshot:
+        entries = snapshot["time_asset_pairs"]
+        groups, seen, by_id = {}, set(), {n["id"]: n for n in board_components}
+        if not isinstance(entries, list) or not entries:
+            pair_failures.append("time_asset_pairs须为非空逐字符配对清单")
+            entries = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                pair_failures.append("时间字符配对必须是对象"); continue
+            active, dark = (by_id.get(entry.get(k)) for k in ("active_id", "aod_id"))
+            if not active or not dark or active["id"] == dark["id"] or any(n["id"] in seen for n in (active, dark)):
+                pair_failures.append(str(entry)+":配对母件缺失或重复"); continue
+            seen.update((active["id"], dark["id"]))
+            key = tuple(n.get("name", "").rpartition("/")[0] for n in (active, dark))
+            paired = groups.setdefault(key, ({}, {}))
+            chars = []
+            for i, master in enumerate((active, dark)):
+                texts = [nodes_by_id[j] for j in descendants(nodes_by_id, master["id"]) if nodes_by_id[j].get("type") == "TEXT"]
+                if len(texts) != 1 or not texts[0].get("characters"):
+                    pair_unknown.append(master["id"]); continue
+                char = texts[0]["characters"]; chars.append(char)
+                if char in paired[i]: pair_failures.append(master["id"]+":重复时间字符")
+                paired[i][char] = master
+            if len(chars) == 2 and chars[0] != chars[1]: pair_failures.append(str(entry)+":字符不匹配")
+        declared_dark = {i for f in snapshot.get("resource_families", []) if f.get("aod") is True and f.get("kind") in ("time", "time_hour", "time_minute", "second") for i in f.get("node_ids", [])}
+        if not declared_dark.issubset(seen): pair_failures.append("已声明的AOD时间族未完整配对")
+        for prefixes, paired in groups.items():
+            for prefix, members in zip(prefixes, paired):
+                actual = {n["id"] for n in board_components if n.get("name", "").rpartition("/")[0] == prefix}
+                if actual != {n["id"] for n in members.values()}: pair_failures.append(prefix+":未完整登记配对")
+            time_groups.extend(paired)
+    else:
+        for key in ("active_node_name_prefix", "node_name_prefix"):
+            prefix = time_style.get(key)
+            group = {}
+            for master in board_components:
+                if not isinstance(prefix, str) or not prefix or not master.get("name", "").startswith(prefix):
+                    continue
+                texts = [nodes_by_id[i] for i in descendants(nodes_by_id, master["id"]) if nodes_by_id[i].get("type") == "TEXT"]
+                if len(texts) != 1 or not texts[0].get("characters"):
+                    pair_unknown.append(master["id"])
+                    continue
+                char = texts[0]["characters"]
+                if char in group:
+                    pair_failures.append(f"重复时间字符：{char}")
+                group[char] = master
+            if not group:
+                pair_unknown.append(key)
+            time_groups.append(group)
+        legacy_dark_ids = {n['id'] for n in time_groups[1].values()}
+        if any(f.get('aod') is True and f.get('kind') in ('time', 'time_hour', 'time_minute', 'second')
+               and not set(f.get('node_ids', [])).issubset(legacy_dark_ids) for f in snapshot.get('resource_families', [])):
+            pair_unknown.append('额外声明的AOD时间族缺少time_asset_pairs，不能沿用单前缀通过结论')
+    for group_index in range(0, len(time_groups), 2):
+        active_chars, dark_chars = time_groups[group_index:group_index+2]
+        if not active_chars or not dark_chars:
+            continue
         if set(active_chars) != set(dark_chars) or not set("0123456789").issubset(active_chars):
             pair_failures.append("亮屏/AOD必须完整配对0–9及所有时间分隔符")
         for char in active_chars.keys() & dark_chars.keys():
@@ -1116,11 +1176,11 @@ def validate_snapshot(snapshot: dict, capability_modes: dict | None = None) -> l
         grid_top = group_top + math.ceil(-group_top * 10 - .00001) / 10 if family.get('baseline_policy') == 'shared_font_baseline' else 0
         common_height = rounded_multiple_of_four(max(item["glyph_bottom"] for item in joint_measurements) - group_top + grid_top + 2 * vertical_padding)
         digit_measurements = [item for item in family_measurements if re.fullmatch(r"[0-9]", item["character"])]
-        common_width = max((item["minimum_width"] for item in digit_measurements), default=0)
+        common_width = max((item["minimum_width"] for item in joint_measurements if re.fullmatch(r"[0-9]", item["character"])), default=0)
         size_failure = any(item["size"][1] != common_height for item in family_measurements)
         if family.get("kind") in {"second", "data", "date"}:
             size_failure = size_failure or any(item["size"][0] != common_width for item in digit_measurements)
-            size_failure = size_failure or any(item["size"][0] != item["minimum_width"] for item in family_measurements if item not in digit_measurements)
+            size_failure = size_failure or any(item["size"][0] != max(item["minimum_width"], measurements.get(time_pairs.get(node_id), {}).get("minimum_width", 0)) for node_id, item in zip(family.get("node_ids", []), family_measurements) if item not in digit_measurements)
         else:
             size_failure = size_failure or any(item["size"][0] != max(item["minimum_width"], measurements.get(time_pairs.get(node_id), {}).get("minimum_width", 0)) for node_id, item in zip(family.get("node_ids", []), family_measurements))
         baseline_groups = {}
@@ -1213,7 +1273,18 @@ def validate_snapshot(snapshot: dict, capability_modes: dict | None = None) -> l
         role_geometries[role_name] = tuple(round(value, 3) for value in (local[0], local[1], role_node["width"], role_node["height"]))
         role_locations.append(f"{role_name}:{local[0]},{local[1]},{role_node['width']}x{role_node['height']}")
         role_text = [nodes_by_id[node_id] for node_id in descendants(nodes_by_id, role_node["id"]) if node_id != role_node["id"] and "characters" in nodes_by_id[node_id] and effectively_visible(nodes_by_id[node_id], nodes_by_id, role_node["id"])]
-        role_text.sort(key=lambda item: (node_origin(item) or (math.inf, math.inf))[0])
+        order_key = role_name.replace("_id", "_order")
+        if order_key in roles:
+            order = roles[order_key]
+            actual_ids = {n["id"] for n in role_text}
+            if not isinstance(order, list) or any(not isinstance(i, str) for i in order) or len(set(order)) != len(order) or set(order) != actual_ids:
+                role_failures.append(order_key+":顺序必须完整覆盖实际可见文字")
+            else:
+                role_text = [nodes_by_id[i] for i in order]
+        elif len({round((node_origin(n) or (0, 0))[1], 1) for n in role_text}) > 1:
+            role_unverified.append(role_name+":多行时间缺少明确字段顺序")
+        else:
+            role_text.sort(key=lambda item: (node_origin(item) or (math.inf, math.inf))[0])
         role_values[role_name] = "".join(str(item.get("characters", "")) for item in role_text)
         if role_node["id"] not in descendants(nodes_by_id, owner_id) or local[0] < 0 or local[1] < 0 or local[0] + role_node["width"] > owner.get("width", 0) or local[1] + role_node["height"] > owner.get("height", 0):
             role_failures.append(role_node["id"])
@@ -1231,6 +1302,9 @@ def validate_snapshot(snapshot: dict, capability_modes: dict | None = None) -> l
     color = style.get("stroke_color", "")
     style_failures, style_unknown = [], []
     masters = [node for node in board_components if isinstance(prefix, str) and prefix and node.get("name", "").startswith(prefix)]
+    if isinstance(snapshot.get("time_asset_pairs"), list):
+        dark_ids = {e.get("aod_id") for e in snapshot["time_asset_pairs"] if isinstance(e, dict)}
+        masters = [node for node in board_components if node["id"] in dark_ids]
     aod_time = nodes_by_id.get(roles.get("time_aod_id")) if isinstance(roles, dict) else None
     targets = set()
     for master in masters:
@@ -1240,7 +1314,7 @@ def validate_snapshot(snapshot: dict, capability_modes: dict | None = None) -> l
     texts = [node for node in nodes if node["id"] in targets and node.get("type") == "TEXT" and effectively_visible(node, nodes_by_id, config["section_id"])]
     if not masters or not any(node["id"] in display_ids for node in texts) or not re.fullmatch(r"#[0-9A-Fa-f]{6}", color):
         style_unknown.append("缺少描边样式要求、母件或实际显示文字")
-    else:
+    if re.fullmatch(r"#[0-9A-Fa-f]{6}", color):
         expected_rgb = {key: int(color[1 + i * 2:3 + i * 2], 16) for i, key in enumerate("rgb")}
         for node in texts:
             if not isinstance(node.get("fills"), list) or not isinstance(node.get("strokes"), list) or not is_finite_number(node.get("stroke_weight")):
@@ -1502,6 +1576,8 @@ def validate_workflow_binding(
         ]
 
     contract_errors: list[str] = []
+    if required_gate != "reference" and isinstance(snapshot, dict) and snapshot.get("config", {}).get("stage") == "prototype":
+        contract_errors.append("样稿快照不能用于正式视觉封存或生产验证")
     contract = None
     try:
         contract = load_contract(contract_path)

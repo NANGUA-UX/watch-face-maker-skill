@@ -9,6 +9,7 @@ import tempfile
 from pathlib import Path
 
 from workflow_guards import file_sha256, load_contract
+from merge_snapshot_pages import validate_snapshot_roles
 
 
 def _read(path):
@@ -46,6 +47,31 @@ def _inputs(contract):
     return value
 
 
+def _snapshot_failures(snapshot):
+    try:
+        validate_snapshot_roles(snapshot)
+        if snapshot.get('evidence_level') == 'preflight' or snapshot.get('config', {}).get('profile') == 'preflight':
+            raise ValueError('preflight快照不能封存为样稿证据')
+        pagination = snapshot.get('pagination', {})
+        count = len(snapshot.get('nodes', []))
+        if (pagination.get('complete') is not True
+                or pagination.get('total_nodes') != count
+                or pagination.get('collected_nodes') != count
+                or len({node['id'] for node in snapshot['nodes']}) != count
+                or snapshot.get('next_offset') is not None):
+            raise ValueError('样稿封存需要完整分页快照')
+        if snapshot.get('schema_version', 1) >= 2:
+            signature = snapshot.get('capture_signature')
+            stability = snapshot.get('stability', {})
+            if not signature or stability.get('status') != 'pass' or any(
+                stability.get(key) != signature for key in ('before', 'after')
+            ):
+                raise ValueError('样稿快照缺少稳定的同轮签名')
+        return []
+    except (ValueError, KeyError, TypeError) as exc:
+        return ['样稿快照无效：' + str(exc)]
+
+
 def _target_failures(snapshot, spec):
     target = _read(spec).get('figma', {}) if spec.is_file() else {}
     config = snapshot.get('config', {})
@@ -72,7 +98,11 @@ def checkpoint_failures(contract_path, contract):
         spec = contract_path.parent / 'project-spec.json'
         if receipt.get('project_spec_sha256') != (file_sha256(spec) if spec.is_file() else None):
             raise ValueError('当前项目需求已变化，需要重新评审样稿')
-        target_failures = _target_failures(_read(paths['snapshot']), spec)
+        sealed_snapshot = _read(paths['snapshot'])
+        snapshot_failures = _snapshot_failures(sealed_snapshot)
+        if snapshot_failures:
+            return snapshot_failures
+        target_failures = _target_failures(sealed_snapshot, spec)
         if target_failures:
             return target_failures
         checks = validate_workflow_binding(
@@ -90,6 +120,9 @@ def seal_prototype(args, contract, manifest, snapshot, review):
 
     if any(contract['gates'][gate] != 'pending' for gate in ('assembly', 'visual_preflight')):
         return ['完整组装或视觉预检已推进，不能事后补签样稿；先退回受影响阶段']
+    snapshot_failures = _snapshot_failures(snapshot)
+    if snapshot_failures:
+        return snapshot_failures
     root = args.contract.parent.resolve()
     archive_root = _path(root, 'prototype-evidence')
     sources = {'contract': args.contract, 'manifest': args.manifest, 'snapshot': args.snapshot,

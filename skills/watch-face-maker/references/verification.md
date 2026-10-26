@@ -150,3 +150,39 @@
 ## 多尺寸任务
 
 多尺寸适配时按[多尺寸适配](multi-size.md)的目标规格、同名资源作用范围、共享采集和批次证据执行。旧 480 项目继续按已记录规格兼容；新任务必须先确认目标尺寸与屏形，不把 480 尺寸、圆形掩模或 256 缩略图作为默认值应用到其他目标。
+
+### 派生几何的位置精度
+
+- 普通布局、指针局部轴心和屏幕轴心保持整数。指针旋转允许保留计算平移，但须核对真实母件、实际实例、完整祖先链（按Figma实际容器复合，跳过GROUP/BOOLEAN_OPERATION）、原始X/Y与矩阵的一致性，复合结果须与`pivot`、`center`和`angle`重建的矩阵在0.001px容差内一致。仅豁免实际承担该旋转的精确节点和已验证指针实例；名称、`rotation_frame_id`声明、FRAME类型或旋转祖先均不能授权整棵子树的小数布局。外框取整后若轴心漂移仍须失败。
+- 径向刻度精度须有`radial_precision`原始构造角色及参数：`coordinate_root_id`、`intersect_id`、`union_id`、`ring_id`、`line_ids`、整数`center`、与源线逐项对应的`angles`和`line_mode`（`ray`单向或`diameter`贯穿圆心）。核对真实INTERSECT→UNION/圆环→源LINE结构与完整子节点集合，矩阵的相对/绝对坐标须按实际容器复合，GROUP和BOOLEAN_OPERATION不作为变换容器，规则依据[Figma relativeTransform文档](https://developers.figma.com/docs/plugins/api/properties/nodes-relativetransform/)；源圆环的完整`arcData`、无填充向内描边及源线长度、中心描边、无端帽须回读。按共同轴心与角度重建线描边矩形、内外圆交点和两个布尔结果的包围框；通过后仅对应源线、两个布尔结果和这个已验证源圆环ID的派生局部位置可保留精度；源圆环在共同坐标根中的轴心与外接框仍须保持整数，不按ELLIPSE类型放行。布尔层框不等于精确墨迹包围框；与理想圆解析边界不同，须补实际fillGeometry/absoluteBoundingBox证据，不误判失败。构造不适用、源结构缺失或布尔坐标空间无法重建时记未验证，不因已有浮点值而通过。
+- `layout_precision.precision_exemptions(snapshot, nodes_by_id)`返回允许小数X/Y的精确ID集合和`{kind,node_id,status,detail}`诊断。整数检查仍遍历其全部普通子层；`fail`与`unverified`不产生豁免。径向诊断仅计入本次原生布局遍历实际覆盖的节点；隐藏历史稿、实例内派生副本和未遍历的组件矢量不因此扩大检查范围。旧圆帽进度、普通图标和插画GROUP没有径向或指针证据时继续保留报警。
+
+最小只读采集片段（在Figma插件上下文运行）：传入当前项目已确认的构造参数，不从结果包围框反推圆心。返回几何节点与声明并入同一次完整快照；不得把旧快照的几何与新声明拼成正式通过证据。
+
+```javascript
+async function captureRadialPrecision(entry) {
+  const ids = [...new Set([entry.coordinate_root_id, entry.intersect_id,
+    entry.union_id, entry.ring_id, ...entry.line_ids])];
+  const nodes = [];
+  for (const id of ids) {
+    const n = await figma.getNodeByIdAsync(id);
+    if (!n) throw new Error(`Missing radial source: ${id}`);
+    const raw = {
+      id: n.id, parent_id: n.parent?.id, type: n.type,
+      x: n.x, y: n.y, width: n.width, height: n.height,
+      relative_transform: n.relativeTransform,
+      absolute_transform: n.absoluteTransform,
+      fills: n.fills, strokes: n.strokes,
+      stroke_weight: n.strokeWeight, stroke_align: n.strokeAlign,
+      strokeCap: n.strokeCap, booleanOperation: n.booleanOperation,
+      arcData: n.arcData,
+    };
+    nodes.push(JSON.parse(JSON.stringify(raw)));
+  }
+  return {nodes, radial_precision: [entry]};
+}
+// entry.angles为源线实际旋转角度（度），与line_ids顺序一致；
+// center在coordinate_root_id的局部坐标中，ray以线起点、diameter以线中点为轴心。
+```
+
+此窄验证支持未缩放/未旋转公共根、刚体旋转源线及完整圆环。多级分摊旋转、其他端帽或非完整圆环保留未验证，须另补实际几何证据后再扩展，不用近似容差遮盖真实结构差异。

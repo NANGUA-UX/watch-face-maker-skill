@@ -1,5 +1,6 @@
 """复核已确认制作决策与原始节点；不写Figma，不推断图标语义或审美。"""
 import math
+from pathlib import PurePosixPath
 from pointer_checks import _screen_transform, transform_at
 from stroke_geometry import validate_stroke_geometry
 
@@ -224,6 +225,65 @@ def resource_ownership(s,nodes):
     return check('resource_ownership',errors,unknown,'交叉核对已确认逐元素行为、背景源实例、展示引用、source_only与正式导出；不按模块动态性推断图标')
 
 
+def family_exportability(s,nodes):
+    """核对已声明成员到本区正式PNG节点的一一映射，不推断字符需求。"""
+    errors,unknown=[],[];families=s.get('resource_families');board=s.get('config',{}).get('asset_board_id');items=s.get('export_items',[])
+    explanation='逐族核对本资源分区可导出母件/实例完整覆盖已声明成员；不推断应有字符或评价视觉风格'
+    if families==[]:
+        named_text=any('/Num/' in str(n.get('name','')) for n in nodes.values()) or any(
+            isinstance(item,dict) and '/Num/' in str(item.get('path','')) for item in (items if isinstance(items,list) else []))
+        if named_text or any(n.get('type')=='TEXT' for n in nodes.values()):
+            return check('family_exportability',errors,['空族清单仍含文字节点或Num资源线索，须核实是否有遗漏字模'],explanation)
+        return dict(id='snapshot.family_exportability',status='not_applicable',explanation='明确无资源族且快照未见文字节点；不代表语义识别完整',locations=[])
+    if families is None:return check('family_exportability',errors,['缺少资源族清单'],explanation)
+    if not isinstance(families,list):return check('family_exportability',['resource_families必须为数组'],unknown,explanation)
+    if board not in nodes:unknown.append('缺少目标资源分区节点')
+    if not isinstance(items,list):return check('family_exportability',['export_items必须为数组'],unknown,explanation)
+    paths={};used_ids=set();used_names=set()
+    for item in items:
+        if isinstance(item,dict) and isinstance(item.get('path'),str):
+            path=str(PurePosixPath(item['path']));paths[path]=paths.get(path,0)+1
+    for family in families:
+        if not isinstance(family,dict):errors.append('资源族必须为对象');continue
+        name=str(family.get('name','未命名族'));members=family.get('node_ids');ids=family.get('export_node_ids')
+        if not isinstance(members,list) or not members or any(not isinstance(id,str) or not id for id in members):
+            errors.append(name+':node_ids必须为非空节点数组');continue
+        if len(set(members))!=len(members):errors.append(name+':成员重复')
+        for id in members:
+            if nodes.get(id,{}).get('type')!='COMPONENT':errors.append(id+':成员母件不存在或不是COMPONENT')
+        if ids is None:unknown.append(name+':缺少export_node_ids，未验证本区独立导出');continue
+        if not isinstance(ids,list) or not ids or any(not isinstance(id,str) or not id for id in ids):
+            errors.append(name+':export_node_ids必须为非空节点数组');continue
+        covered=set()
+        for id in ids:
+            if id in used_ids:errors.append(id+':重复导出节点')
+            used_ids.add(id);n=nodes.get(id)
+            if not n:errors.append(id+':本区导出节点不存在');continue
+            if board in nodes and visible(n,board,nodes) is not True:errors.append(id+':导出节点不在本区或不可见')
+            if n.get('type') not in ('COMPONENT','INSTANCE'):errors.append(id+':导出节点必须为母件或实例')
+            master=n.get('main_component_id') if n.get('type')=='INSTANCE' else id
+            if master not in members:errors.append(id+':母件不属于所声明资源族')
+            elif master in covered:errors.append(id+':同一成员有多个导出节点')
+            else:covered.add(master)
+            node_name=n.get('name')
+            if not isinstance(node_name,str) or not node_name:errors.append(id+':缺少资源名称')
+            elif node_name in used_names:errors.append(id+':本区资源重名')
+            else:used_names.add(node_name)
+            exports=[item for item in items if isinstance(item,dict) and item.get('node_id')==id]
+            if len(exports)!=1:errors.append(id+':必须唯一登记正式导出项');continue
+            item=exports[0];path=item.get('path')
+            if not isinstance(path,str) or not path or '\\' in path or PurePosixPath(path).is_absolute() or '..' in PurePosixPath(path).parts or PurePosixPath(path).suffix!='.png':
+                errors.append(id+':PNG相对导出路径无效')
+            elif paths[str(PurePosixPath(path))]!=1:errors.append(id+':重复导出路径 '+path)
+            if item.get('role')!='asset':errors.append(id+':资源族导出角色必须为asset')
+            settings=n.get('export_settings',[])
+            settings=[setting for setting in settings if isinstance(setting,dict) and setting.get('format')=='PNG'] if isinstance(settings,list) else []
+            selected=item.get('setting',settings[0] if len(settings)==1 else None)
+            if selected is None or selected not in settings:errors.append(id+':缺少明确匹配的PNG导出设置')
+        for id in set(members)-covered:errors.append(name+':缺少本区可导出成员 '+id)
+    return check('family_exportability',sorted(set(errors)),sorted(set(unknown)),explanation)
+
+
 def validate_delivery_guards(snapshot,capability_modes=None):
     nodes={n['id']:n for n in snapshot.get('nodes',[])}
-    return [fn(snapshot,nodes) for fn in (icon_orientation,state_layout,pointer_annotations,resource_ownership,resource_board_layout)] + [validate_stroke_geometry(snapshot,nodes),native_progress(snapshot,nodes,capability_modes)]
+    return [fn(snapshot,nodes) for fn in (icon_orientation,state_layout,pointer_annotations,resource_ownership,resource_board_layout,family_exportability)] + [validate_stroke_geometry(snapshot,nodes),native_progress(snapshot,nodes,capability_modes)]

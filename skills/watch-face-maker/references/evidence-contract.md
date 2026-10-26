@@ -12,9 +12,13 @@
 
 清单的 `source_strategy` 记录图片素材来源：`mode` 为 `new|modify|reuse_allowed|reuse_forbidden`，并分别填写 `reference_image_hashes`、`adopted_image_hashes`、`reused_image_hashes`。哈希使用实际文件SHA-256或Figma读取到的40位图片哈希；`new` 与 `reuse_forbidden` 的复用数组必须为空。此字段约束图片素材，不把指定组件库实例误报为旧背景复用。
 
-在 `use_figma` 的只读 JavaScript 上下文调用 `await collectSnapshot(config)`。`config` 必须包含 `file_key`、`section_id`、`asset_board_id`、`main_id`、`active_id`、`aod_id`、`preview_id`；可用 `offset` 和 `limit` 分页，`limit` 默认为 20。每页返回 `page: {offset, limit, count}`、`total_nodes` 和 `next_offset`。节点过多时可设 `skip_instance_children: true`，此时仍记录实例本身和母件引用，报告会把深层可见叶子组装标为未验证。
+在 `use_figma` 的只读 JavaScript 上下文调用 `await collectSnapshot(config)`。`config.stage` 指制作阶段，取 `prototype|production`，省略时仍为 `production`。它与采集精度 `profile: full|validation|preflight` 独立：样稿也可用 validation，preflight 始终不能成为封存或正式交付证据。
 
-合并契约：所有页必须具有相同 `total_nodes`、`capture_signature` 和遍历选项，`page.offset` 从 0 按 `page.count` 无缝连续，末页 `next_offset` 为 `null`。采集器每页计算整组几何签名，即使节点数量相同，也能识别字体、位置或导出设置变化。使用 `scripts/merge_snapshot_pages.py PAGES.json SNAPSHOT.json` 合并按顺序保存的分页数组；签名变化、缺页或重复ID时停止，不写伪完整结果。不能通过重新填写总数或去重来掩盖版本混合。导出完成后再核对签名；变化时重新采集和验证受影响产物。合并后添加 `export_items: [{"node_id":"...", "path":"Dial1/...png", "role":"asset|presentation_main|aod_full"}]`，路径从当前节点名称生成。
+正式 production 必须包含 `file_key`、`section_id`、`asset_board_id`、`main_id`、`active_id`、`aod_id`、`preview_id`。prototype 必须包含真实的 `file_key`、`section_id`、`main_id`、`active_id`；资源板尚未建立时可省略 `asset_board_id`，已经使用的资源板必须登记其真实ID。AOD、Preview 仅在已经存在时登记；禁止把 main/active 的ID填成 AOD/Preview。所有已登记角色必须是当前 section 中实际读取、彼此不同的节点；未创建的角色不补占位节点或别名。采集器把默认 stage 写入返回 config，省略未登记的可选角色。
+
+可用 `offset` 和 `limit` 分页，`limit` 默认为 20。每页返回 `page: {offset, limit, count}`、`total_nodes` 和 `next_offset`。节点过多时可设 `skip_instance_children: true`，此时仍记录实例本身和母件引用，报告会把深层可见叶子组装标为未验证。
+
+合并契约：所有页必须具有相同 `total_nodes`、`capture_signature`、stage、profile、角色配置和遍历选项，`page.offset` 从 0 按 `page.count` 无缝连续，末页 `next_offset` 为 `null`。采集器每页计算整组几何签名，即使节点数量相同，也能识别字体、位置或导出设置变化。使用 `scripts/merge_snapshot_pages.py PAGES.json SNAPSHOT.json` 合并按顺序保存的分页数组；签名变化、缺页或重复ID时停止，不写伪完整结果。不能通过重新填写总数或去重来掩盖版本混合。样稿分页允许没有派生节点，合并后仍复核本阶段必要角色、角色互异和分区归属；不能把样稿分页改成 production 或混入正式分页。导出完成后再核对签名；变化时重新采集和验证受影响产物。合并后添加 `export_items: [{"node_id":"...", "path":"Dial1/...png", "role":"asset|presentation_main|aod_full"}]`，路径从当前节点名称生成。
 
 采集器只遍历指定 section，不加载字体，不写节点，不发网络请求。`glyph_bounds` 是 Figma `absoluteRenderBounds` 的记录，不是 PNG alpha bounds。若字形的祖先被裁切，必须从临时无裁切测量源补入 `unclipped_glyph_bounds`，否则对应尺寸检查为 `unverified`。分页合并后可人工补充：
 

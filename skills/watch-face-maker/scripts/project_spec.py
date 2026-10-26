@@ -18,7 +18,7 @@ def validate_spec(spec):
         errors.append('project-spec.schema_version 必须为1')
     if not isinstance(spec.get('operation'), str) or spec['operation'] not in OPERATIONS:
         errors.append('operation 必须为 create/modify/organize/audit')
-    for field in ('target', 'confirmations', 'identity', 'source_strategy', 'figma', 'scope', 'capabilities', 'development', 'features', 'capability_modes'):
+    for field in ('target', 'confirmations', 'identity', 'source_strategy', 'figma', 'scope', 'capabilities', 'development', 'features', 'capability_modes', 'capability_presentations'):
         if field in spec and not isinstance(spec[field], dict):
             errors.append(field+' 必须是对象')
     for field in ('languages', 'themes', 'units', 'component_libraries'):
@@ -51,6 +51,14 @@ def validate_spec(spec):
             for key in keys:
                 if key in obj and (not isinstance(obj[key], list) or any(not isinstance(v,str) or not v for v in obj[key])):
                     errors.append(field+'.'+key+'必须是字符串数组')
+    presentations = spec.get('capability_presentations', {})
+    if isinstance(presentations, dict):
+        requested = spec.get('capabilities', {})
+        requested = requested.get('requested', []) if isinstance(requested, dict) else []
+        requested = requested if isinstance(requested, list) else []
+        for capability, presentation in presentations.items():
+            if capability != 'battery' or not isinstance(presentation, str) or presentation not in ('numeric', 'progress') or capability not in requested:
+                errors.append('capability_presentations 仅支持已请求battery的numeric/progress表现')
     if 'task_mode' in spec and spec['task_mode'] not in ('original','replicate','adapt'):
         errors.append('task_mode 必须为 original/replicate/adapt')
     if 'complexity' in spec and spec['complexity'] not in ('native','template','complex_visual'):
@@ -96,6 +104,12 @@ def preflight(spec, evidence=None, *, dependencies=None):
     development = spec.get('development', {})
     dev_ok = confirmed.get('development') and bool(development.get('source')) and set(requested).issubset(development.get('supported', []))
     local.append(item('requirements.development','pass' if dev_ok else 'unverified','本次能力有开发依据' if dev_ok else '本次能力或开发来源待核实'))
+    if 'battery' in requested:
+        explicit = 'battery' in spec.get('capability_presentations', {})
+        local.append(item('requirements.presentations','pass' if explicit else 'unverified','电量表现已显式登记' if explicit else '电量表现待确认：numeric或progress；不推断旧项目表现'))
+    if operation != 'audit':
+        scope_ok = confirmed.get('write_scope') is True and bool(spec.get('scope', {}).get('node_ids'))
+        local.append(item('requirements.write_scope','pass' if scope_ok else 'unverified','用户已授权本次修改范围' if scope_ok else '缺少用户授权的具体修改范围'))
     dependencies = dependencies if dependencies is not None else dict(python=sys.version_info >= (3,9),pillow=importlib.util.find_spec('PIL') is not None,node=shutil.which('node') is not None)
     for key in ('python','pillow','node'):
         local.append(item('dependencies.'+key,'pass' if dependencies.get(key) is True else 'fail','运行依赖可用' if dependencies.get(key) is True else '缺少运行依赖：'+key))
@@ -114,15 +128,16 @@ def preflight(spec, evidence=None, *, dependencies=None):
         perm_ok = isinstance(permissions,dict) and permissions.get('read') is True
         remote.append(item('figma.permissions','pass' if perm_ok else 'unverified','只读审核不要求写权限' if perm_ok else '缺少读取权限证据'))
     else:
-        scope = spec.get('scope', {})
         basis = permissions.get('basis') if isinstance(permissions,dict) else None
         basis_ok = isinstance(basis,dict) and basis.get('file_key') == figma.get('file_key') and basis.get('kind') in ('successful_write','file_creation') and isinstance(basis.get('response_sha256'),str) and re.fullmatch(r'[a-fA-F0-9]{64}',basis['response_sha256']) is not None
         if basis_ok and basis['kind'] == 'successful_write':
             changes = basis.get('changed_node_ids')
             basis_ok = isinstance(changes,list) and bool(changes) and all(isinstance(v,str) and v for v in changes)
-        perm_ok = isinstance(permissions,dict) and permissions.get('read') is True and permissions.get('write') is True and basis_ok and confirmed.get('write_scope') and bool(scope.get('node_ids'))
+        perm_ok = isinstance(permissions,dict) and permissions.get('read') is True and permissions.get('write') is True and basis_ok and permissions.get('receipt_validation') != 'invalid'
         denied = isinstance(permissions,dict) and permissions.get('write') is False
-        remote.append(item('figma.permissions','pass' if perm_ok else ('fail' if denied else 'unverified'),'写入权限与修改范围有依据' if perm_ok else '写入权限或修改范围缺少证据；不通过试写猜测'))
+        first_action = isinstance(permissions,dict) and permissions.get('read') is True and not denied and 'basis' not in permissions and permissions.get('receipt_validation') != 'invalid'
+        explanation = ('已有成功写入回执支持技术权限' if perm_ok else ('现场明确拒绝写入，停止制作' if denied else ('尚无历史写入回执；仅允许授权范围内首次必要制作，成功后保存真实响应' if first_action else '读取权限或已有写入回执无效；重新读取现场并核对原始响应')))
+        remote.append(item('figma.permissions','pass' if perm_ok else ('fail' if denied else 'unverified'),explanation))
     required_fonts, font_unknown = [], False
     for family in spec.get('text_families', []):
         style = family.get('style', {})
@@ -151,6 +166,39 @@ def preflight(spec, evidence=None, *, dependencies=None):
         found = {v.get('key') for v in libraries if isinstance(v,dict) and v.get('accessible') is True}
         missing = set(required_libraries)-found
         remote.append(item('figma.libraries','fail' if missing else 'pass','指定组件库不可用：'+str(sorted(missing)) if missing else '指定组件库可检索'))
-    ready = all(c['status'] in ('pass','not_applicable') for c in local+remote)
-    routing = dict(operation=operation,start_stage='intake' if operation=='create' else ('audit' if operation=='audit' else 'assembly'),write_allowed=ready and operation!='audit')
-    return dict(exit_code=0 if ready else 1,local_checks=local,figma_checks=remote,routing=routing)
+    checks = local+remote
+    required = [c for c in checks if c['id'] != 'figma.permissions']
+    ready = all(c['status'] in ('pass','not_applicable') for c in required)
+    permission_status = next(c['status'] for c in remote if c['id'] == 'figma.permissions')
+    permission_ready = perm_ok if operation == 'audit' else (perm_ok or first_action)
+    ready = ready and permission_ready
+    write_ready = bool(ready and operation != 'audit')
+    routing = dict(operation=operation,start_stage='intake' if operation=='create' else ('audit' if operation=='audit' else 'assembly'),write_allowed=write_ready)
+    details = []
+    for check in checks:
+        if check['status'] in ('pass','not_applicable') or (check['id'] == 'figma.permissions' and permission_ready):
+            continue
+        key = check['id']
+        category = 'implementation_error'
+        if key.startswith('requirements.'):
+            category = 'unsupported' if check['status'] == 'fail' else 'missing_user_fact'
+        elif key.startswith('figma.') and check['status'] == 'unverified':
+            category = 'stale_evidence'
+        action = {
+            'requirements.target':'补齐并确认目标尺寸、屏形；非支持规格先适配screen_spec',
+            'requirements.source':'记录用户确认的素材来源与复用范围',
+            'requirements.development':'补充开发来源及其支持的实际能力',
+            'requirements.write_scope':'记录已获用户授权的scope.node_ids与confirmations.write_scope',
+            'requirements.presentations':'确认并登记capability_presentations.battery为numeric或progress',
+            'figma.target':'重新只读采集当前文件和目标节点，核对file_key与target_id',
+            'figma.permissions':'核对读取/明确拒绝状态与原始写入响应；不得探测性试写',
+            'figma.fonts':'只读采集可用字体与源节点字体，按原字体补齐',
+            'figma.libraries':'检索声明组件库并保存真实可访问结果',
+        }.get(key, '安装缺少的运行依赖后重新执行preflight')
+        details.append(dict(id=key, category=category, explanation=check['explanation'], next_step=action))
+    next_step = ('只读审核当前阶段证据' if operation == 'audit' and ready else
+                 '按当前阶段在授权范围内执行必要制作；成功后保存真实工具响应并重新preflight' if write_ready else
+                 details[0]['next_step'] if details else '重新读取现场证据')
+    return dict(exit_code=0 if ready else 1,local_checks=local,figma_checks=remote,routing=routing,
+                write_ready=write_ready,permissions=permission_status,production_validation='unverified',
+                production_ready=False,blocker_details=details,next_step=next_step)

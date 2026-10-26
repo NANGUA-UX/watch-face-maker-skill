@@ -33,9 +33,15 @@ def _screen_transform(node, nodes, roots):
     seen = {node['id']}
     while transform and parent_id not in roots:
         parent = nodes.get(parent_id)
-        if not parent or parent_id in seen or not parent.get('relative_transform'):
+        if not parent or parent_id in seen:
             return None, parent_id, layer_id
         seen.add(parent_id)
+        # Figma relativeTransform相对最近容器，GROUP/BOOLEAN的框由后代派生。
+        if parent.get('type') in ('GROUP', 'BOOLEAN_OPERATION'):
+            layer_id, parent_id = parent_id, parent.get('parent_id')
+            continue
+        if not parent.get('relative_transform'):
+            return None, parent_id, layer_id
         a, b = parent['relative_transform'], transform
         transform = [[a[r][0]*b[0][c] + a[r][1]*b[1][c] + (a[r][2] if c == 2 else 0)
                       for c in range(3)] for r in range(2)]

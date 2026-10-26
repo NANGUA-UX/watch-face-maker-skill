@@ -4,6 +4,33 @@ import json
 from pathlib import Path
 
 
+def validate_snapshot_roles(snapshot):
+    """新采集证据按阶段核对真实角色；保留没有stage的旧v1读取语义。"""
+    config = snapshot.get("config", {})
+    stage = config.get("stage") or "production"
+    if stage not in {"prototype", "production"}:
+        raise ValueError("未知采集阶段")
+    if snapshot.get("schema_version", 1) < 2 and "stage" not in config:
+        return
+    required = ["file_key", "section_id", "main_id", "active_id"]
+    roles = ["section_id", "asset_board_id", "main_id", "active_id", "aod_id", "preview_id"]
+    if stage == "production":
+        required.extend(["asset_board_id", "aod_id", "preview_id"])
+    if any(not config.get(key) for key in required):
+        raise ValueError("采集阶段缺少必要角色配置")
+    ids = [config[key] for key in roles if config.get(key)]
+    nodes = {node["id"]: node for node in snapshot["nodes"]}
+    if len(set(ids)) != len(ids):
+        raise ValueError("采集角色不能共用节点ID，禁止主稿冒充AOD或Preview")
+    for node_id in ids:
+        current, visited = node_id, set()
+        while current != config["section_id"] and current in nodes and current not in visited:
+            visited.add(current)
+            current = nodes[current].get("parent_id")
+        if current != config["section_id"] or node_id not in nodes:
+            raise ValueError("采集角色不在指定分区内")
+
+
 def merge_pages(pages):
     if not pages:
         raise ValueError("没有快照页")
@@ -34,12 +61,14 @@ def merge_pages(pages):
             raise ValueError("分页游标或末页位置不符")
     if offset != total or len({n["id"] for n in nodes}) != total:
         raise ValueError("节点不完整或ID重复")
-    return {
+    snapshot = {
         **first, "nodes": nodes, "config": scope,
         "capture_end": pages[-1]["captured_at"], "next_offset": None,
         "page": {"offset": 0, "limit": total, "count": total},
         "pagination": {"total_nodes": total, "collected_nodes": total, "complete": True},
     }
+    validate_snapshot_roles(snapshot)
+    return snapshot
 
 
 if __name__ == "__main__":

@@ -343,9 +343,18 @@ async function applyTextAssets(plan, api=figma) {
       instance.x=before.x;instance.y=before.y;modified.push(instance.id);
     }
   }
+  const idsByPath=new Map(plan.edits.map((e,i)=>[e.entry.path,componentIds[i]]));
+  const timePairs=plan.edits.filter(e=>e.aod && ['time_hour','time_minute','second'].includes(
+    plan.measurement.records.find(r=>r.entry.path===e.entry.path).kind)).map(e=>({
+      active_id:idsByPath.get(e.entry.pair_path) || componentIds[plan.edits.findIndex(q=>q.entry.pair_path===e.entry.path)],
+      aod_id:idsByPath.get(e.entry.path)}));
   return {createdNodeIds:created,modifiedNodeIds:modified,preservedNodeIds:preserved,cleanedNodeIds:cleaned,
+    time_asset_pairs:timePairs,
     resource_families:plan.measurement.input.families.map(f=>({name:f.id,
       kind:['time_hour','time_minute'].includes(f.kind) ? 'time' : f.kind,
+      aod:f.aod===true,
+      export_node_ids:plan.edits.map((e,i)=>({e,id:componentIds[i]})).filter(v=>f.entries.some(e=>e.path===v.e.entry.path) &&
+        inspected.section.children.some(n=>n.id===v.id)).map(v=>v.id),
       baseline_policy:'shared_font_baseline',node_ids:plan.edits.map((e,i)=>({e,id:componentIds[i]})).filter(v=>f.entries.some(e=>e.path===v.e.entry.path)).map(v=>v.id)})),
     resourceSectionId:inspected.section.id,entries:plan.edits.map((e,i)=>({path:e.entry.path,
       component_id:componentIds[i],width:e.width,height:e.height,margins:e.margins}))};

@@ -17,7 +17,9 @@ python3 "<SKILL_DIR>/scripts/watch_face.py" preflight <项目目录> --figma-evi
 
 现场证据来自Figma只读采集，字段为 `origin:figma_readonly`、`capture_signature`、`file_key`、`target_id`、`nodes`、`fonts`、`source_fonts`、`libraries`、`permissions`。字体必须有实际family/style；原生TEXT样式来源登记 `source_fonts[节点ID]`。声明的组件库逐个记录 `key` 与真实 `accessible` 结果。不能因读到目标而写 `write:true`。
 
-写权限依据只能复用已有成功写入或建文件响应，不试写节点探测权限。将工具返回JSON内容原样保存到项目内，`permissions.basis`登记 `kind:successful_write|file_creation`、`file_key`、`receipt_path`、文件真实SHA-256。成功写入响应需含 `changedNodeIds`，basis内 `changed_node_ids`逐项相同；建文件响应需含 `file_key/file_url`。`confirmations.write_scope:true`和 `scope.node_ids`来自用户已授权的范围。审核只需要读取证据。
+用户授权与技术权限分别判断：`confirmations.write_scope:true`及非空`scope.node_ids`记录用户授权；`permissions`只表示已证实的技术权限。现场目标、读取权限、字体、组件库与范围满足，且没有明确写入拒绝或失效回执时，允许在授权范围内执行首次必要制作，`write_ready:true`，但`figma.permissions`和`permissions`仍为`unverified`。不得为了探测权限试写节点；第一次动作必须直接产出本次制作所需内容。成功后保存真实响应，再预检验证技术权限；失败或明确`write:false`时停止，保留真实失败事实。
+
+已有写权限依据继续复用成功写入或建文件响应，不能因回执失效退回首次制作通道。将工具返回JSON内容原样保存到项目内，`permissions.basis`登记 `kind:successful_write|file_creation`、`file_key`、`receipt_path`、文件真实SHA-256。成功写入响应需含 `changedNodeIds`，basis内 `changed_node_ids`逐项相同；建文件响应需含 `file_key/file_url`。`confirmations.write_scope:true`和 `scope.node_ids`来自用户已授权的范围。审核只需要读取证据。
 
 ## 同步与旧项目
 
@@ -37,6 +39,10 @@ python3 "<SKILL_DIR>/scripts/watch_face.py" check <项目目录> --json
 
 退出码统一：`0`可继续，`1`检查未通过或事实待确认，`2`输入结构无效。初始化成功仅表示建立待完成模板，不代表允许写入Figma或完成制作。
 
-`check --gate`与正式`check/status`都会核对已确认的目标、来源策略、开发依据和合同需求派生字段；state与事实相同不代表替换进来的旧合同仍有效。阶段门禁只证明阶段条件，写入前仍需单独通过现场预检。
+`preflight/check/status`共享`phase_state`，并在顶层保留同名字段：`stage`、原始`gates`、`write_ready`、实际`permissions`、`production_validation/production_ready`、`blocker_details`及`next_step`。原有`routing/local_checks/figma_checks/blockers`等返回字段保持兼容。`write_ready`只说明现场制作条件满足，不能证明阶段已通过或正式交付完成。阶段卡同时运行当前阶段的真实只读门禁判定，保留原始pending，不写pass。阻塞项分为`missing_user_fact`（缺用户事实）、`implementation_error`（实现或制作未完成）、`stale_evidence`（缺失或过期证据）、`unsupported`（暂不支持），每项给出具体下一步。需求与同步基线或合同不一致时先`sync`；不能用满足现场条件绕过。
+
+`check --gate`与正式`check/status`都会核对已确认的目标、来源策略、开发依据和合同需求派生字段；state与事实相同不代表替换进来的旧合同仍有效。阶段门禁只证明阶段条件，保持只读；命令成功不会写入门禁或授权。写入前查看阶段卡的`write_ready`和现场条件。缺产品码及实际设备约束时仍不能正式通过；这些外部事实不阻断当前阶段制作与评审，不生成占位码或默认设备事实。设备保留区沿用采集配置的`canvas.reserved_regions`及正式校验器规则。
+
+样稿pass必须有[阶段卡片](stage-cards.md)规定的封存证据；check同时复核其合同需求、项目事实、快照、PNG和逐项评审。原样稿封存目录不能被后续组装覆盖，缺失证据不自动补为通过。
 
 正式`check`成功后保存校验器实际生成的当前报告，替换前将旧报告原始字节留在报告所在目录的`history/<报告名>-<SHA256>.json`。`status`根据当前输入哈希与重新校验结果判断，不改文件。`audit`的`check`只返回本次结果，不保存报告；后续`status`仍需可用的当前报告。

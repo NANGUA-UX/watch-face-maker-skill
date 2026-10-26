@@ -13,6 +13,7 @@ from pathlib import Path
 
 from project_spec import preflight, validate_spec
 from validate_cross_model_results import revalidate_production
+from workflow_guards import load_contract, verified_gate_failures
 
 VIEWS = {'manifest': 'audit-manifest.json', 'workflow_contract': 'workflow-contract.json',
          'config': 'snapshot-config.json'}
@@ -81,6 +82,7 @@ def derived(spec):
                      'features': spec.get('features', {}),
                      'capabilities.requested': spec.get('capabilities', {}).get('requested', []),
                      'capability_modes': spec.get('capability_modes', {}),
+                     **({'capability_presentations': spec['capability_presentations']} if 'capability_presentations' in spec else {}),
                      'source_strategy': spec.get('source_strategy', {})},
         'workflow_contract': {'task_mode': spec.get('task_mode'), 'complexity': spec.get('complexity'),
                              'target': target, 'source_strategy': source},
@@ -143,6 +145,7 @@ def import_project(root, args):
                 units=[], features=manifest.get('features', {}), figma={k: config.get(k) for k in ('file_key', 'page_id', 'section_id')}, scope={}, text_families=[],
                 source_strategy=csource if csource is not None else (msource or {}),
                 capability_modes=manifest.get('capability_modes', {}),
+                **({'capability_presentations': manifest['capability_presentations']} if 'capability_presentations' in manifest else {}),
                 capabilities={'requested': manifest.get('capabilities', {}).get('requested', [])},
                 development={}, confirmations={})
     errors = validate_spec(spec)
@@ -202,6 +205,8 @@ def remote_evidence(root, name):
         return None
     permissions = e.get('permissions', {})
     basis = permissions.get('basis', {}) if isinstance(permissions, dict) else {}
+    if not isinstance(permissions, dict) or 'basis' not in permissions:
+        return e
     try:
         receipt = inside(root, basis['receipt_path'])
         raw = read(receipt)
@@ -213,7 +218,7 @@ def remote_evidence(root, name):
     except (KeyError, TypeError, ValueError, OSError):
         ok = False
     if not ok and isinstance(permissions, dict):
-        permissions.pop('basis', None)
+        permissions['receipt_validation'] = 'invalid'
     return e
 
 
@@ -221,7 +226,7 @@ def requirement_blockers(spec, state, contract):
     if spec != state.get('spec'):
         return ['需求已变化，请先同步；旧合同不得推进门禁']
     blockers = [c['explanation'] for c in preflight(spec)['local_checks']
-                if c['id'].startswith('requirements.') and c['status'] != 'pass']
+                if c['id'].startswith('requirements.') and c['id'] != 'requirements.write_scope' and c['status'] != 'pass']
     for field, expected in derived(spec)['workflow_contract'].items():
         if get(contract, field) != expected:
             blockers.append('合同与当前需求不一致：'+field+'；请先处理冲突并同步')
@@ -235,6 +240,8 @@ def status(root, spec, state, artifacts=None, exports_dir='exports', *, validate
     contract = read(paths['workflow_contract']) if paths['workflow_contract'].exists() else {}
     stale = set(state.get('stale_artifacts', []))
     ready, production, blockers = False, 'unverified', requirement_blockers(spec, state, contract)
+    if not spec.get('identity', {}).get('product_code'):
+        blockers.append('正式交付缺少用户提供的产品码；阶段制作与评审可继续')
     if spec != state.get('spec'):
         blockers.append('需求已变化，请先同步；原证据待重新采集')
         stale.update(v.name for v in paths.values() if v.is_file())
@@ -257,12 +264,75 @@ def status(root, spec, state, artifacts=None, exports_dir='exports', *, validate
                 blockers.append(str(exc)); production = 'fail'
     if not ready:
         blockers.append('缺少当前输入绑定的正式生产校验通过结果')
-    pending = [k for k, v in contract.get('gates', {}).items() if v != 'pass']
+    pending = [k for k, v in contract.get('gates', {}).items() if v not in ('pass', 'not_applicable')]
     return dict(exit_code=0 if ready else 1, operation=spec['operation'],
                 stage=pending[0] if pending else 'production_validation',
                 production_validation=production, production_ready=ready,
                 stale_artifacts=sorted(stale), blockers=blockers,
                 next_step='处理阻塞项并重新执行check' if blockers else '等待用户验收与固件验证')
+
+
+def phase_state(root, spec, state, result, current, figma_evidence):
+    """所有只读入口共用同一阶段卡，命令退出码仍各自表示其检查结果。"""
+    contract = read(inside(root, state['views']['workflow_contract']))
+    live = preflight(spec, remote_evidence(root, figma_evidence))
+    details = list(live.get('blocker_details', []))
+    for index, explanation in enumerate(current.get('blockers', [])):
+        if any(v['explanation'] == explanation for v in details):
+            continue
+        category, action = 'implementation_error', '修复校验器报告的具体失败项后重新执行check'
+        if '产品码' in explanation:
+            category, action = 'missing_user_fact', '向产品方补齐正式产品码并同步；继续当前阶段制作与评审'
+        elif any(v in explanation for v in ('需要适配', '不受支持')):
+            category, action = 'unsupported', '先适配并验证该目标能力，再继续正式制作'
+        elif any(v in explanation for v in ('需求已变化', '合同与当前需求', '冲突')):
+            category, action = 'stale_evidence', '在project-spec确认冲突选择后执行sync，再重新采集受影响证据'
+        elif '缺少当前输入绑定' in explanation:
+            category, action = 'stale_evidence', '完成当前阶段并封存实际快照、PNG、工具回执及视觉评审，再执行check'
+        elif any(v in explanation for v in ('设备', '真机', '保留区')):
+            category, action = 'missing_user_fact', '补齐实际设备约束；继续阶段评审，正式check仍需真实设备事实'
+        details.append(dict(id='production.'+str(index), category=category,
+                            explanation=explanation, next_step=action))
+    stage = current['stage']
+    stage_actions = {
+        'intake':'确认需求与来源事实后完成intake阶段；只读执行check --gate intake复核',
+        'reference':'补齐认可参考、哈希、不变量与制作路线后执行check --gate reference',
+        'prototype':'完成并封存真实样稿、PNG、工具回执与逐项评审后执行check --gate prototype',
+        'assembly':'完成Main/AOD/Preview实际组装及受影响资源后执行check --gate assembly',
+        'visual_preflight':'核对真实导出与逐项视觉评审后执行check --gate visual_preflight',
+    }
+    if stage in stage_actions:
+        contract_path = inside(root, state['views']['workflow_contract'])
+        try:
+            failures = verified_gate_failures(contract_path, load_contract(contract_path), stage)
+        except ValueError as exc:
+            failures = [str(exc)]
+        details.extend(dict(id='stage.'+stage, category='implementation_error', explanation=v,
+                            next_step=stage_actions[stage]) for v in failures)
+    requirements = requirement_blockers(spec, state, contract)
+    write_ready = live.get('write_ready', False) and not requirements
+    if requirements:
+        next_step = next((v['next_step'] for v in details if v['explanation'] == requirements[0]), '核对项目事实与合同后执行sync')
+    elif write_ready:
+        next_step = ('完成'+stage+'阶段条件并执行check --gate '+stage+'；需要制作时仅在授权范围内执行，成功后保存真实响应并重新preflight'
+                     if stage != 'production_validation' else '执行正式check；若需修复，仅在授权范围内制作并更新实际证据')
+    elif spec['operation'] == 'audit':
+        next_step = '只读评审'+stage+'阶段证据；补齐正式事实后再执行check'
+    else:
+        next_step = live.get('next_step', '重新执行preflight核对制作条件')
+    if current['production_ready']:
+        next_step = '等待用户验收与固件验证'
+    shared = dict(stage=stage, gates=contract.get('gates', {}),
+                  write_ready=write_ready, permissions=live.get('permissions', 'unverified'),
+                  production_validation=current['production_validation'], production_ready=current['production_ready'],
+                  blocker_details=details, next_step=next_step)
+    if 'routing' in result:
+        result['routing']['write_allowed'] = write_ready
+        if requirements:
+            result['exit_code'] = 1
+    result.update(shared)
+    result['phase_state'] = copy.deepcopy(shared)
+    return result
 
 
 def main():
@@ -281,6 +351,7 @@ def main():
     args = parser.parse_args()
     root = args.project.resolve()
     artifacts = {k: getattr(args, k) for k in ARTIFACTS}
+    current = None
     try:
         if args.command == 'init':
             if not args.input:
@@ -304,8 +375,10 @@ def main():
             if args.command == 'sync':
                 result = sync(root, spec, state)
             elif args.command == 'preflight':
+                current = status(root, spec, state, artifacts, args.exports_dir)
                 result = preflight(spec, remote_evidence(root, args.figma_evidence))
             elif args.command == 'check' and args.gate:
+                current = status(root, spec, state, artifacts, args.exports_dir)
                 contract_path = inside(root, state['views']['workflow_contract'])
                 blockers = requirement_blockers(spec, state, read(contract_path))
                 if blockers:
@@ -332,9 +405,11 @@ def main():
                                         shutil.copyfile(previous, history)
                                 save(previous, report)
                         except ValueError as exc:
-                            result.update(exit_code=1, production_validation='fail', blockers=[str(exc)])
+                            result.update(exit_code=1, production_validation='fail', blockers=result['blockers']+[str(exc)])
             else:
                 result = status(root, spec, state, artifacts, args.exports_dir)
+            if args.command in ('preflight', 'status', 'check'):
+                result = phase_state(root, spec, state, result, current if current is not None else result, args.figma_evidence)
     except (OSError, ValueError, TypeError, KeyError) as exc:
         result = dict(exit_code=2, errors=[str(exc)], summary='输入结构无效，未执行同步')
     if args.json:
