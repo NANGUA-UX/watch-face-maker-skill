@@ -41,11 +41,11 @@ python3 "<SKILL_DIR>/scripts/watch_face.py" check <项目目录> --gate <intake|
 - 规则进度、底轨和装饰弧/直线先读[描边与端点](references/stroke-geometry.md)：使用无填充的原生描边，端点按参考设置，不默认叠加圆形端帽；登记并采集真实路径证据，结构与视觉分别验证。
 - 制作规则圆形刻度前必读[圆形刻度](references/circular-ticks.md)：默认采用“同心径向线阵列 → Union → 与圆环 Intersect”，保留可编辑源；长短刻度分组。不得默认以逐个定位的小矩形替代；例外须有用户指令或具体形状依据。检查源结构、共圆心、角度和实际可见数量，不只检查外观。
 - 所有文字切图内部 `TEXT` 水平居中，包括数字、单位、符号、星期、月份和标签。切图宽高为 4 的倍数；文本框宽高为正偶数整数；完整字形和基线不得切边。详细几何与命名按[交付验证](references/verification.md)和[命名与状态](references/naming-and-states.md)执行。
-- 单行单样式文字使用[字模母件生成器](references/text-asset-builder.md)的测量→计划→应用流程。修复限定母件与所有关联实例范围，保留ID、内容、字体、字号及用户排布；源变化重新测量，不支持项停止。新生成族显式登记共同字体基线，旧族不自动改变排版政策。
+- 新建单行单样式文字使用[字模母件生成器](references/text-asset-builder.md)的测量→计划→应用流程；已有字模的尺寸派生按[多尺寸规则](references/multi-size.md#同屏形比例派生)原生克隆，不强制重新生成。修复限定母件与所有关联实例范围，保留ID、内容、字体、字号及用户排布；源变化重新测量，不支持项停止。新生成族显式登记共同字体基线，旧族不自动改变排版政策。
 - 主时间（Hour、Minute 及 AOD 配对）按实际字符使用变宽切图；这个例外不扩展到秒数。秒数与普通数据、日期的同族 `0–9` 默认统一宽高，符号和单位仍按排版语义处理。不得把某个表盘的具体像素尺寸写成通用值。
 - AOD 默认制作。数字时间和 AOD 指针在目标原生尺寸下使用无填充灰色描边，默认及最小宽度均为 2 px；缩放后复查母件和实例。亮屏与 AOD 的每个时间字符逐对同宽同高，包括分隔符。
 - 表盘英文名可以有空格；切图前缀去掉空格后连写，不使用下划线。默认仅制作英文；变色、多语言、特殊日期、动画和开发文档列出的其他能力均按需启用。
-- 指针盘读[指针规则](references/analog-pointers.md)，多尺寸任务读[多尺寸适配](references/multi-size.md)，动画任务读[动画切图](references/animation-assets.md)。背景边界、AI素材和选定版本收尾读[混合制作与素材质量](references/background-composition.md)。
+- 指针盘读[指针规则](references/analog-pointers.md)，多尺寸任务读[多尺寸适配](references/multi-size.md)：同屏形、同长宽比默认从认可源稿等比派生，仅作必要尺寸修正，保留TEXT、效果与排布；改变屏形/长宽比或用户要求重排才走重排路线。动画任务读[动画切图](references/animation-assets.md)。背景边界、AI素材和选定版本收尾读[混合制作与素材质量](references/background-composition.md)。
 
 ## 视觉预检与正式命令
 
