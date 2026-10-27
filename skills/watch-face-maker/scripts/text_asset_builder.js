@@ -8,14 +8,15 @@ const assetExportState = settings => Array.isArray(settings) ? settings.map(s=>(
   useAbsoluteBounds:false,colorProfile:'DOCUMENT',...s})) : settings;
 const cloneAssetValue = value => JSON.parse(JSON.stringify(value));
 const assetRound = (v, step) => Math.max(step, Math.ceil((v-1e-7)/step)*step);
+const assetIntegerFact = v => Number.isFinite(v) && Math.abs(v-Math.round(v))<=.001;
 const assetGrid = (v, min, max) => {
-  const low=Math.ceil((min-1e-7)*10)/10,high=Math.floor((max+1e-7)*10)/10;
-  if(low>high) throw Error('完整字形无法在0.1px坐标网格内安全定位');
-  return Math.max(low,Math.min(high,Math.round(v*10)/10));
+  const low=Math.ceil(min-1e-7),high=Math.floor(max+1e-7);
+  if(low>high) throw Error('完整字形无法在整像素坐标网格内安全定位');
+  return Math.max(low,Math.min(high,Math.round(v)));
 };
 const assetMinimumWidth = r => {
   const bearing=r.bounds.x+(assetRound(r.advance_width,2)-r.advance_width)/2;
-  return assetRound(r.bounds.width+bearing+Math.ceil(-bearing*10-1e-7)/10,4);
+  return assetRound(r.bounds.width+bearing+Math.ceil(-bearing-1e-7),4);
 };
 const assetFontAvailable = (fonts,name) => fonts.some(f=>f.fontName.family===name.family && f.fontName.style===name.style);
 function assetMeasureBounds(text) {
@@ -49,7 +50,7 @@ function validateTextInput(input) {
       if(typeof entry.characters!=='string' || !entry.characters.trim() || /[\r\n]/.test(entry.characters) ||
          typeof entry.path!=='string' || !entry.path || paths.has(entry.path)) throw Error('只支持非空单行内容及唯一资源路径');
       paths.add(entry.path);
-      if(input.operation==='create' && ![entry.x,entry.y].every(Number.isFinite)) throw Error('新建必须登记排布坐标');
+      if(input.operation==='create' && ![entry.x,entry.y].every(Number.isInteger)) throw Error('新建必须登记整数排布坐标');
       if(input.operation==='modify' && !entry.component_id) throw Error('修复须逐项指定母件ID');
     }
   }
@@ -81,12 +82,14 @@ async function checkRepairScope(component, scope) {
   if(!component || component.type!=='COMPONENT' || component.remote || !scope.node_ids.includes(component.id))
     throw Error('母件不在声明范围或远程只读');
   checkAssetLayout(component);
+  if(![component.x,component.y].every(assetIntegerFact)) throw Error('已有母件坐标须为整数；不能擅自移动：'+component.id);
   const instances=await component.getInstancesAsync();
   for(const instance of instances) {
     if(!scope.instance_ids.includes(instance.id)) throw Error('范围外关联实例：'+instance.id);
     if(instance.locked) throw Error('关联实例已锁定：'+instance.id);
     // 实例自身type为INSTANCE，检查父布局；尺寸覆盖无法可靠补偿。
     checkAssetLayout(instance.parent);
+    if(![instance.x,instance.y].every(assetIntegerFact)) throw Error('关联实例坐标须为整数；不能擅自移动：'+instance.id);
     const t=instance.relativeTransform;
     if((t && (t[0][0]!==1 || t[1][1]!==1 || t[0][1]!==0 || t[1][0]!==0)) ||
        instance.width!==component.width || instance.height!==component.height ||
@@ -143,6 +146,16 @@ function styleOfText(text) {
     text_case:text.textCase,text_decoration:text.textDecoration};
 }
 
+function requireAssetPixelStyle(style) {
+  if(!Number.isInteger(style?.font_size) || style.font_size<=0) throw Error('目标字号须为正整数；先按适配规则取整');
+  if(style.stroke_weight!==undefined && (!Number.isInteger(style.stroke_weight) || style.stroke_weight<0))
+    throw Error('目标描边须为非负整数');
+  for(const key of ['line_height','letter_spacing']) {
+    const value=style[key];
+    if(value?.unit==='PIXELS' && !Number.isInteger(value.value)) throw Error('像素行高和字距须为整数');
+  }
+}
+
 function setAssetTextStyle(text, style, aod) {
   text.fontName=style.font_name;text.fontSize=style.font_size;
   text.lineHeight=style.line_height || {unit:'AUTO'};
@@ -190,15 +203,18 @@ async function measureTextAssets(input, api=figma) {
   try {
     container=api.createFrame();created.push(container.id);temporary.push(container);
     container.name='字模临时测量';container.clipsContent=false;container.fills=[];
-    container.x=Math.max(200,...api.currentPage.children.filter(n=>n!==container).map(n=>n.x+n.width))+64;
+    container.x=Math.ceil(Math.max(200,...api.currentPage.children.filter(n=>n!==container).map(n=>n.x+n.width)))+64;
     container.y=200;
     const fonts=await api.listAvailableFontsAsync();
     const familyStyles=new Map();
     for(const r of inspected.records) {
       const expected=r.source ? styleOfText(r.source) : cloneAssetValue(r.family.style);
+      if(r.family.aod && r.source) expected.stroke_weight=Math.max(2,expected.stroke_weight || 0);
+      requireAssetPixelStyle(expected);
       checkRequestedTextStyle(r,expected,input.operation);
       const style=r.text ? styleOfText(r.text) : (r.source ? styleOfText(r.source) : cloneAssetValue(r.family.style));
       if(r.family.aod) style.stroke_weight=Math.max(2,style.stroke_weight || 0,expected.stroke_weight || 0);
+      requireAssetPixelStyle(style);
       if(!style?.font_name || !Number.isFinite(style.font_size) || style.font_size<=0 ||
          !assetFontAvailable(fonts,style.font_name)) throw Error('指定字体不可用；禁止替换');
       await api.loadFontAsync(style.font_name);
@@ -244,6 +260,7 @@ function planTextAssets(measurement) {
     if(!textAssetKinds.has(r.kind) || !r.bounds || ![r.bounds.x,r.bounds.y,r.bounds.width,r.bounds.height,r.advance_width,r.line_height].every(Number.isFinite) ||
        r.bounds.width<=0 || r.bounds.height<=0 || r.advance_width<=0 || r.line_height<=0 ||
        !r.entry?.characters || /[\r\n]/.test(r.entry.characters) || paths.has(r.entry.path)) throw Error('字形测量不完整、非单行或路径重复');
+    requireAssetPixelStyle(r.style);
     paths.set(r.entry.path,r);
   }
   const pairs=new Map(records.map(r=>[r.entry.path,new Set()]));
@@ -271,7 +288,7 @@ function planTextAssets(measurement) {
   };
   const edits=records.map(r=>{
     const group=groupFor(r),top=Math.min(...group.map(q=>q.bounds.y)),bottom=Math.max(...group.map(q=>q.bounds.y+q.bounds.height));
-    const firstTop=top+Math.ceil(-top*10-1e-7)/10;
+    const firstTop=top+Math.ceil(-top-1e-7);
     const height=assetRound(bottom-top+firstTop,4),textY=assetGrid(-top+(height-(bottom-top))/2,-top,height-bottom);
     const peers=records.filter(q=>q===r || q.entry.pair_path===r.entry.path || r.entry.pair_path===q.entry.path);
     let w=Math.max(...peers.map(assetMinimumWidth));

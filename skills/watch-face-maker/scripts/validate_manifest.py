@@ -535,7 +535,7 @@ def validate_digit_geometry(nodes_by_id: dict, all_text: bool = False, baseline_
         if not all(is_finite_number(node.get(k)) for k in ("width", "height", "x", "y")):
             unknown.append(node["id"])
             continue
-        if any(node[k] <= 0 or abs(node[k] / 2 - round(node[k] / 2)) > .00001 for k in ("width", "height")) or any(abs(node[k] * 10 - round(node[k] * 10)) > .00001 for k in ("x", "y")):
+        if any(node[k] <= 0 or abs(node[k] - round(node[k] / 2) * 2) > .001 for k in ("width", "height")) or any(abs(node[k] - round(node[k])) > .001 for k in ("x", "y")):
             failures.append(node["id"])
         bounds = node.get("unclipped_glyph_bounds") or node.get("glyph_bounds") or node.get("render_bounds")
         origin = node_origin(source)
@@ -553,19 +553,118 @@ def validate_digit_geometry(nodes_by_id: dict, all_text: bool = False, baseline_
             key = (baseline_ids[source['id']], json.dumps([node.get('font_name'), node.get('font_size')], sort_keys=True))
             baselines.setdefault(key, []).append((node['id'], round(text_origin[1] - origin[1], 3)))
         center_error = abs(margins[0] - margins[2]) if baseline_symbol or shared_baseline else max(abs(margins[0] - margins[2]), abs(margins[1] - margins[3]))
-        if min(bounds["width"], bounds["height"]) <= 0 or min(margins) < 0 or center_error > .102:
+        if min(bounds["width"], bounds["height"]) <= 0 or min(margins) < 0 or center_error > 1.002:
             failures.append(node["id"])
     for group in baselines.values():
         if len({v for _, v in group}) > 1:
             failures.extend(identity for identity, _ in group)
     status = "fail" if failures else ("unverified" if unknown or not count else "pass")
     label = "文字" if all_text else "数字"
-    explanation = f"核对{count}个{label}文本：宽高偶数整数，X/Y最多一位小数，实际字形中心偏差不超过0.05px（另容许0.001px计算尾差）"
+    explanation = f"核对{count}个{label}文本：宽高偶数整数，X/Y整像素，最近可行整数居中的字形中心偏差不超过0.5px（另容许0.001px计算尾差）"
     if all_text:
         explanation += "；文本水平对齐属性须为CENTER；单字符标点仅自动检查水平居中，垂直基线须另行核对"
     if baseline_ids:
         explanation += "；明确采用shared_font_baseline的族检查共同基线、水平中心与完整边界"
     return check_item("snapshot.text_geometry" if all_text else "snapshot.digit_geometry", status, explanation, sorted(set(failures + unknown)))
+
+
+def validate_native_pixel_values(nodes_by_id, native_ids, geometry_exempt_ids=()):
+    failures, unknown = [], []
+
+    def pixel(node, label, keys, required=False, positive=False):
+        values = [node[key] for key in keys if key in node]
+        if not values:
+            if required:
+                unknown.append(node['id'] + '.' + label)
+            return
+        numbers = [value for value in values if is_finite_number(value)]
+        if len(numbers) != len(values):
+            unknown.append(node['id'] + '.' + label)
+        if (any(abs(value-round(value)) > .001 or (positive and value <= 0) for value in numbers)
+                or (numbers and max(numbers)-min(numbers) > .001)):
+            failures.append(node['id'] + '.' + label)
+
+    for identity in sorted(native_ids):
+        node = nodes_by_id[identity]
+        for key in ('x', 'y', 'width', 'height'):
+            derived = identity in geometry_exempt_ids and (key in ('x', 'y') or node.get('type') in ('GROUP', 'BOOLEAN_OPERATION'))
+            if not derived:
+                pixel(node, key, (key,), required=True)
+        if node.get('type') == 'TEXT':
+            pixel(node, 'font_size', ('font_size', 'fontSize'), required=True, positive=True)
+            segments = node.get('text_segments', [])
+            segments = segments if isinstance(segments, list) else []
+            for index, segment in enumerate(segments):
+                if isinstance(segment, dict) and 'fontSize' in segment:
+                    pixel({'id': f'{identity}.segments[{index}]', 'value': segment['fontSize']}, 'font_size', ('value',), positive=True)
+            for keys in (('line_height', 'lineHeight'), ('letter_spacing', 'letterSpacing')):
+                for key in keys:
+                    value = node.get(key)
+                    if isinstance(value, dict) and value.get('unit') == 'PIXELS':
+                        pixel({'id': identity, 'value': value.get('value')}, key, ('value',), required=True)
+                    elif value == 'mixed':
+                        cursor = 0
+                        for index, segment in enumerate(segments):
+                            if (not isinstance(segment, dict) or segment.get('start') != cursor
+                                    or not is_integer(segment.get('end')) or segment['end'] <= cursor):
+                                unknown.append(identity + '.' + key)
+                                break
+                            cursor = segment['end']
+                            part = segment.get(keys[-1])
+                            if not isinstance(part, dict):
+                                unknown.append(identity + '.' + key)
+                            elif part.get('unit') == 'PIXELS':
+                                pixel({'id': f'{identity}.segments[{index}]', 'value': part.get('value')}, key, ('value',), required=True)
+                        if not segments or not isinstance(node.get('characters'), str) or cursor != len(node['characters']):
+                            unknown.append(identity + '.' + key)
+        for key in ('cornerRadius', 'topLeftRadius', 'topRightRadius', 'bottomLeftRadius', 'bottomRightRadius',
+                    'itemSpacing', 'counterAxisSpacing', 'paddingLeft', 'paddingRight', 'paddingTop', 'paddingBottom'):
+            if node.get(key) == 'mixed' and key == 'cornerRadius':
+                for corner in ('topLeftRadius', 'topRightRadius', 'bottomLeftRadius', 'bottomRightRadius'):
+                    pixel(node, corner, (corner,), required=True)
+            elif key in node:
+                pixel(node, key, (key,))
+        strokes = node.get('strokes', [])
+        if not isinstance(strokes, list) or any(not isinstance(s, dict) for s in strokes):
+            unknown.append(identity + '.strokes')
+            strokes = []
+        if any(not is_finite_number(s.get('opacity', 1)) for s in strokes):
+            unknown.append(identity + '.strokes.opacity')
+        visible_stroke = any(s.get('visible', True) and is_finite_number(s.get('opacity', 1)) and s.get('opacity', 1) > 0 for s in strokes)
+        sides = ('strokeTopWeight', 'strokeBottomWeight', 'strokeLeftWeight', 'strokeRightWeight')
+        if node.get('strokeWeight', node.get('stroke_weight')) == 'mixed':
+            for side in sides:
+                pixel(node, side, (side,), required=True)
+        else:
+            pixel(node, 'stroke_weight', ('stroke_weight', 'strokeWeight'), required=visible_stroke, positive=visible_stroke)
+        for side in sides:
+            pixel(node, side, (side,))
+        pattern = node.get('dashPattern', [])
+        if not isinstance(pattern, list):
+            unknown.append(identity + '.dashPattern')
+        else:
+            for index, length in enumerate(pattern):
+                pixel({'id': identity, 'value': length}, f'dashPattern[{index}]', ('value',), required=True)
+        effects = node.get('effects', [])
+        if not isinstance(effects, list):
+            unknown.append(identity + '.effects')
+            effects = []
+        for index, effect in enumerate(effects):
+            if not isinstance(effect, dict):
+                unknown.append(identity + '.effects')
+                continue
+            for key in ('radius', 'spread'):
+                if key in effect:
+                    pixel({'id': f'{identity}.effects[{index}]', key: effect[key]}, key, (key,))
+            offset = effect.get('offset', {})
+            if not isinstance(offset, dict):
+                unknown.append(identity + '.effects.offset')
+                continue
+            for key, value in offset.items():
+                pixel({'id': f'{identity}.effects[{index}].offset', key: value}, key, (key,))
+    return check_item('snapshot.native_pixel_values', 'fail' if failures else ('unverified' if unknown else 'pass'),
+                      '普通布局的坐标、宽高、字号、描边、圆角、间距和阴影像素量须为整数；仅容许0.001尾差，实际墨迹/颜色/矩阵不作取整',
+                      sorted(set(failures + unknown)))
 
 
 def validate_target_binding(manifest, snapshot):
@@ -806,31 +905,66 @@ def validate_snapshot(snapshot: dict, capability_modes: dict | None = None) -> l
             artwork_roots.add(root["id"])
 
     precise_ids, precision_diagnostics = precision_exemptions(snapshot, nodes_by_id)
+    inherited_precise = set(precise_ids)
+    derived_preview_ids = set()
+    preview = nodes_by_id[config['preview_id']]
+    fit = fit_preview(spec)
+    for candidate in ([preview] if preview.get('type') == 'INSTANCE' else children.get(preview['id'], [])):
+        transform = candidate.get('relative_transform', candidate.get('relativeTransform'))
+        if (candidate.get('type') == 'INSTANCE' and candidate.get('main_component_id') == config['active_id']
+                and all(is_finite_number(candidate.get(k)) and abs(candidate[k]-fit[k]) <= .001 for k in ('width', 'height'))
+                and isinstance(transform, list) and len(transform) == 2
+                and all(isinstance(row, list) and len(row) == 3 for row in transform)
+                and any(all(is_finite_number(transform[r][c]) and abs(transform[r][c]-(scale if r == c else 0)) <= .001
+                            for r in range(2) for c in range(2)) for scale in (1, fit['scale']))
+                and (candidate['id'] == preview['id'] or all(is_finite_number(transform[r][2]) and abs(transform[r][2]-fit['x' if r == 0 else 'y']) <= .001 for r in range(2)))):
+            derived_preview_ids.update(descendants(nodes_by_id, candidate['id']))
 
-    def check_position(node):
-        if node["id"] in visited or node.get("visible") is False:
+    def same_local_geometry(node, source):
+        return (source and node.get('type') == source.get('type')
+                and all(is_finite_number(node.get(k)) and is_finite_number(source.get(k))
+                        and abs(node[k]-source[k]) <= .001 for k in ('x', 'y', 'width', 'height'))
+                and node.get('relative_transform') == source.get('relative_transform'))
+
+    def check_position(node, source=None, descend=True):
+        if node["id"] in visited or node['id'] in derived_preview_ids or node.get("visible") is False:
             return
         visited.add(node["id"])
+        if same_local_geometry(node, source) and source['id'] in precise_ids:
+            inherited_precise.add(node['id'])
         if not all(is_finite_number(node.get(k)) for k in ("x", "y")):
             position_unknown.append(node["id"])
-        elif node["id"] not in precise_ids and node.get("parent_id") != config["preview_id"]:
-            decimal_text = snapshot.get("text_geometry") is True and text_source(node, nodes_by_id)
-            decimal_digit = snapshot.get("digit_geometry") is True and digit_source(node, nodes_by_id)
-            precision = 10 if decimal_text or decimal_digit else 1
-            if any(abs(node[k] * precision - round(node[k] * precision)) > .00001 for k in ("x", "y")):
+        elif node["id"] not in inherited_precise:
+            if any(abs(node[k] - round(node[k])) > .001 for k in ("x", "y")):
                 position_failures.append(node["id"])
-        if node.get("type") != "INSTANCE" and node["id"] not in artwork_roots:
-            for child in children.get(node["id"], []):
-                check_position(child)
+        artwork = node['id'] in artwork_roots or (same_local_geometry(node, source) and source['id'] in artwork_roots)
+        if not descend or artwork:
+            return
+        if node.get('type') == 'INSTANCE':
+            master = nodes_by_id.get(node.get('main_component_id'))
+            if not master or master['id'] not in board_ids:
+                return  # Component-library vector internals are not native layout.
+            if any(not is_finite_number(node.get(k)) or not is_finite_number(master.get(k))
+                   or abs(node[k]-master[k]) > .001 for k in ('width', 'height')):
+                position_unknown.append(node['id'] + ':非1×实例，先修母件映射')
+                return
+            source = master
+        actual_children, source_children = children.get(node['id'], []), children.get(source['id'], []) if source else []
+        for index, child in enumerate(actual_children):
+            peer = source_children[index] if len(actual_children) == len(source_children) else None
+            check_position(child, peer)
 
     if snapshot.get("integer_positions") is True:
-        roots = board_components + [nodes_by_id[config[k]] for k in ("main_id", "aod_id", "preview_id")]
+        roots = board_components + [nodes_by_id[config[k]] for k in ("main_id", "active_id", "aod_id", "preview_id")]
         for root in roots:
-            for child in children.get(root["id"], []):
-                check_position(child)
+            check_position(root)
+        for key in ('section_id', 'asset_board_id'):
+            check_position(nodes_by_id[config[key]], descend=False)
     else:
         position_unknown.append("未声明整数定位要求")
-    checks.append(check_item("snapshot.integer_positions", "fail" if position_failures else ("unverified" if position_unknown else "pass"), f"核对{len(visited)}个原生可见图层的局部X/Y；按已声明的文字或数字规则允许文本一位小数，其余布局保持整数；派生坐标由源组件和缩放保证" if not position_failures else "原生布局位置精度不满足规则", position_failures + position_unknown))
+    checks.append(check_item("snapshot.integer_positions", "fail" if position_failures else ("unverified" if position_unknown else "pass"), f"核对{len(visited)}个原生可见图层及母件根的整数X/Y；仅已验证旋转、径向和缩略图等比派生保留精度" if not position_failures else "原生布局位置精度不满足规则", position_failures + position_unknown))
+    checks.append(validate_native_pixel_values(nodes_by_id, visited, inherited_precise) if snapshot.get('integer_positions') is True
+                  else check_item('snapshot.native_pixel_values', 'unverified', '未声明普通布局整数要求'))
     relevant = [d for d in precision_diagnostics if d['kind'] == 'pointer' or d['node_id'] in visited]
     invalid = [d['node_id']+':'+d['detail'] for d in relevant if d['status'] == 'fail']
     unknown = [d['node_id']+':'+d['detail'] for d in relevant if d['status'] == 'unverified']

@@ -74,7 +74,7 @@ async function collectSnapshot(config) {
   const fields = ["x", "y", "width", "height", "visible", "relativeTransform", "fills", "strokes", "opacity",
     "clipsContent", "exportSettings", "effects", "characters", "fontName", "fontSize", "strokeWeight", "strokeAlign",
     "lineHeight", "letterSpacing", "textAlignHorizontal", "textAlignVertical", "vectorPaths", "vectorNetwork",
-    "textStyleId", "fillStyleId", "componentProperties", "overrides", "layoutMode", "itemSpacing", "constraints",
+    "textStyleId", "fillStyleId", "componentProperties", "overrides", "layoutMode", "itemSpacing", "counterAxisSpacing", "constraints",
     "cornerRadius", "primaryAxisAlignItems", "boundVariables", "paddingLeft", "paddingRight", "paddingTop", "paddingBottom",
     "blendMode", "isMask", "maskType", "booleanOperation", "strokeCap", "strokeJoin", "dashPattern",
     "topLeftRadius", "topRightRadius", "bottomLeftRadius", "bottomRightRadius", "cornerSmoothing",
