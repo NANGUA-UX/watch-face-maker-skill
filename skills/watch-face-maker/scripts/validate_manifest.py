@@ -826,7 +826,7 @@ def validate_snapshot(snapshot: dict, capability_modes: dict | None = None) -> l
         for check_id in (
             "snapshot.section_scope", "snapshot.component_names", "snapshot.component_exports",
             "snapshot.instance_links", "snapshot.assembly_layout", "snapshot.deep_composition", "snapshot.text_measurements",
-            "snapshot.icon_orientation", "snapshot.state_layout", "snapshot.pointer_annotations", "snapshot.resource_ownership",
+            "snapshot.icon_orientation", "snapshot.state_layout", "snapshot.pointer_annotations", "snapshot.position_annotations", "snapshot.resource_ownership",
             "snapshot.resource_families", "snapshot.time_cutout_pairs", "snapshot.shared_data", "snapshot.state_families", "snapshot.time_roles", "snapshot.aod_style", "snapshot.animations", "snapshot.integer_positions", "snapshot.digit_geometry", "snapshot.text_geometry", "snapshot.progress_tracks",
         ):
             analog_time_pairs = check_id == "snapshot.time_cutout_pairs" and snapshot.get("face_type") == "analog" and not has_digital_time(snapshot)
@@ -1972,7 +1972,12 @@ def validate_workflow_binding(
         "；".join(visual_errors) if visual_errors else "同尺寸并排图、叠图、局部图及逐项视觉结论与当前合同和快照绑定",
         visual_errors,
     )
-    return [contract_check, visual_check]
+    checks = [contract_check, visual_check]
+    if isinstance(snapshot, dict) and snapshot.get('position_annotations'):
+        from position_annotations import validate_annotation_review
+        checks.append(validate_annotation_review(snapshot, review.get('position_annotation_review') if isinstance(review, dict) else None,
+                                                 visual_review_path.parent if visual_review_path else Path('.')))
+    return checks
 
 
 def production_validation_check(checks: list[dict], missing: list[str]) -> dict:

@@ -149,6 +149,9 @@ def main() -> int:
             edge_image.save(path)
             edge['artifacts'][key] = artifact(path)
         review['background_edge_review'] = edge
+    if snapshot.get('position_annotations'):
+        from position_annotations import annotation_review_template
+        review['position_annotation_review'] = annotation_review_template(snapshot)
     review_path = output / "visual-review.json"
     review_path.write_text(json.dumps(review, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"已生成视觉预检证据：{review_path}")

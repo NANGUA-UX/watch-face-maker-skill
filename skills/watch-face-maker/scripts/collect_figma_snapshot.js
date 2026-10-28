@@ -16,6 +16,10 @@ async function collectSnapshot(config) {
   if (!Array.isArray(strokeIds) || strokeIds.some(id => typeof id !== 'string' || !id)
       || new Set(strokeIds).size !== strokeIds.length) throw new Error('描边路径采集ID须为无重复字符串数组');
   const strokePaths = new Set(strokeIds);
+  const annotationIds = config.position_annotation_path_ids === undefined ? [] : config.position_annotation_path_ids;
+  if (!Array.isArray(annotationIds) || annotationIds.some(id => typeof id !== 'string' || !id)
+      || new Set(annotationIds).size !== annotationIds.length) throw new Error('位置标注路径采集ID须为无重复字符串数组');
+  const annotationPaths = new Set(annotationIds);
 
   const section = await figma.getNodeByIdAsync(config.section_id);
   if (!section) throw new Error(`找不到 section：${config.section_id}`);
@@ -62,6 +66,10 @@ async function collectSnapshot(config) {
       parent = parent.parent;
     }
   }
+  for (const id of annotationPaths) {
+    const node = allNodes.find(node => node.id === id);
+    if (!node || !['LINE', 'VECTOR'].includes(node.type)) throw new Error(`位置标注路径无效：${id}`);
+  }
 
   // 每页都记录整组几何签名，拒绝把编辑中的不同版本拼成完整快照。
   const canonical = (value) => {
@@ -78,7 +86,7 @@ async function collectSnapshot(config) {
     "cornerRadius", "primaryAxisAlignItems", "boundVariables", "paddingLeft", "paddingRight", "paddingTop", "paddingBottom",
     "blendMode", "isMask", "maskType", "booleanOperation", "strokeCap", "strokeJoin", "dashPattern",
     "topLeftRadius", "topRightRadius", "bottomLeftRadius", "bottomRightRadius", "cornerSmoothing",
-    "strokeTopWeight", "strokeBottomWeight", "strokeLeftWeight", "strokeRightWeight", "arcData", "resolvedVariableModes"];
+    "strokeTopWeight", "strokeBottomWeight", "strokeLeftWeight", "strokeRightWeight", "arcData", "resolvedVariableModes", "guides"];
   const nodeContent = (node, references) => JSON.stringify(canonical([node.id, node.parent?.id, node.name, node.type,
     ...fields.map((key) => key in node ? node[key] : null), references[node.id] || null,
     node.type === "TEXT" ? node.getStyledTextSegments(["fontName", "fontSize", "fills", "textStyleId", "lineHeight", "letterSpacing", "textCase", "textDecoration"]) : null]));
@@ -203,7 +211,7 @@ async function collectSnapshot(config) {
       if ("strokeWeight" in node) record.stroke_weight = plain(node.strokeWeight);
       if ("strokeAlign" in node) record.stroke_align = plain(node.strokeAlign);
       record.content_signature = hashText(nodeContent(node, refsBefore)).toString(16);
-      if (profile === 'validation' && strokePaths.has(node.id)) {
+      if ((profile === 'validation' && strokePaths.has(node.id)) || annotationPaths.has(node.id)) {
         for (const key of ['vectorPaths', 'vectorNetwork']) if (key in node) record[key] = plain(node[key]);
       }
     }

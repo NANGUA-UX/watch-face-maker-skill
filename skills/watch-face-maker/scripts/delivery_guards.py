@@ -3,6 +3,7 @@ import math
 from pathlib import PurePosixPath
 from pointer_checks import _screen_transform, transform_at
 from stroke_geometry import validate_stroke_geometry
+from position_annotations import validate_position_annotations, _line
 
 
 def check(name, errors, unknown, explanation):
@@ -167,28 +168,36 @@ def pointer_annotations(s,nodes):
     if not pointers:unknown.append('缺少指针及标注对应关系')
     for p in pointers:
         role=p.get('role','指针');a=p.get('annotation')
+        modern=s.get('position_annotations',[])
+        if isinstance(modern,list) and any(isinstance(entry,dict) and entry.get('kind')=='pointer' and isinstance(entry.get('source_instance_ids'),list) and p.get('instance_id') in entry['source_instance_ids'] for entry in modern):
+            current=validate_position_annotations(s,nodes)
+            if current['status']=='fail':errors.extend(current['locations'])
+            elif current['status']!='pass':unknown.extend(current['locations'])
+            continue
         if not a:unknown.append(role+':缺少标注图形映射');continue
         try:
-            root=a['frame_id'];frame=nodes[root];hand=nodes[a['instance_id']];dot=nodes[a['pivot_node_id']];line=nodes[a['line_node_id']];master=nodes[p['master_id']]
-            if frame['type']!='FRAME' or hand['type']!='INSTANCE' or dot['type']!='ELLIPSE' or line['type']!='RECTANGLE':raise ValueError('标注图形类型未支持')
+            root=a['frame_id'];frame=nodes[root];hand=nodes[a['instance_id']];dot=nodes.get(a.get('pivot_node_id'));line=nodes[a['line_node_id']];master=nodes[p['master_id']]
+            if a.get('pivot_node_id') and dot is None:raise KeyError('已登记轴心点未采集')
+            if frame['type']!='FRAME' or hand['type']!='INSTANCE':raise ValueError('标注图形类型未支持')
             if not close([hand['width'],hand['height']],[master['width'],master['height']]):errors.append(role+':标注实例尺寸与切图不符')
-            for ink in (dot,line):
+            for ink in ([dot] if dot else [])+[line]:
                 if 'fills' not in ink and 'strokes' not in ink:unknown.append(ink['id']+':缺少实际绘制样式')
                 elif not any(paint.get('visible',True) and paint.get('opacity',1)>0 for paint in ink.get('fills',[])+ink.get('strokes',[])):errors.append(ink['id']+':标注图形无可见填充或描边')
             offset=a.get('offset',[0,0]);center=[p['center'][i]+offset[i] for i in range(2)]
-            t,_,_=_screen_transform(hand,nodes,{root});dt,_,_=_screen_transform(dot,nodes,{root});lt,_,_=_screen_transform(line,nodes,{root})
-            if any(v is None for v in (t,dt,lt)):raise KeyError('标注祖先链')
+            t,_,_=_screen_transform(hand,nodes,{root});dt=_screen_transform(dot,nodes,{root})[0] if dot else None
+            if t is None or (dot and dt is None):raise KeyError('标注祖先链')
             if hand.get('main_component_id')!=p['master_id'] or not close(sum(t,[]),sum(transform_at(p['pivot'],center,0),[])):errors.append(role+':标注指针未按实际轴心置于零位')
             point=lambda m,x,y:[m[r][0]*x+m[r][1]*y+m[r][2] for r in range(2)]
-            if not close(point(dt,dot['width']/2,dot['height']/2),center):errors.append(role+':标注轴心点错误')
-            top=point(lt,line['width']/2,0);bottom=point(lt,line['width']/2,line['height'])
+            if dot and not close(point(dt,dot['width']/2,dot['height']/2),center):errors.append(role+':标注轴心点错误')
+            top,bottom=sorted(_line(line,nodes,root,'red',legacy=True),key=lambda p:p[1])
             if not close([top[1],bottom[1],top[0]],[center[1]-p['pivot'][1],center[1],bottom[0]]):errors.append(role+':红线顶边或轴心端点错误')
-            for n in (frame,hand,dot,line):
+            for n in ([frame,hand,line]+([dot] if dot else [])):
                 if n.get('export_settings'):errors.append(n['id']+':标注不应导出')
                 v=visible(n,root,nodes)
                 if v is False:errors.append(n['id']+':标注图形隐藏')
                 elif v is None:unknown.append(n['id']+':祖先未采集')
-        except (KeyError,TypeError,ValueError,IndexError):unknown.append(role+':标注原始节点不足')
+        except LookupError:unknown.append(role+':标注原始节点不足')
+        except (TypeError,ValueError,IndexError):errors.append(role+':标注图形或样式不符')
     return check('pointer_annotations',errors,unknown,'从实际指针、轴心点和红线复合变换计算零位与距离，不以标签文字替代图形')
 
 
@@ -321,4 +330,4 @@ def verified_family_exports(s,nodes):
 
 def validate_delivery_guards(snapshot,capability_modes=None):
     nodes={n['id']:n for n in snapshot.get('nodes',[])}
-    return [fn(snapshot,nodes) for fn in (icon_orientation,state_layout,pointer_annotations,resource_ownership,resource_board_layout,family_exportability)] + [validate_stroke_geometry(snapshot,nodes),native_progress(snapshot,nodes,capability_modes)]
+    return [fn(snapshot,nodes) for fn in (icon_orientation,state_layout,pointer_annotations,validate_position_annotations,resource_ownership,resource_board_layout,family_exportability)] + [validate_stroke_geometry(snapshot,nodes),native_progress(snapshot,nodes,capability_modes)]
