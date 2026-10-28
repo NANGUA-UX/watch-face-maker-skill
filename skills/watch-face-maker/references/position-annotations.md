@@ -44,6 +44,25 @@
 
 结构检查覆盖三类适用对象、母件引用与真实1×、正式显示来源、局部/屏幕轴心、零位变换、水平原生guide、实际底色、LINE/开放VECTOR及有效无填充描边（默认2px）、端点和读数、导出关闭。进度同时检查完整范围、起止颜色、计角与增长方向，不能因数字表盘没有指针就略过进度或旋转数字标注。
 
-视觉报告的`position_annotation_review`数组逐`frame_id`建立记录，初始`status:unverified`、`evidence:null`、`notes:""`，`evidence:{path,sha256}`指向评审目录内当前真实1×PNG；`snapshot_fingerprint`由模板自动绑定当前快照，`notes`记录实际逐图评审说明；报告外层`snapshot_sha256`绑定本轮快照。实际查看每张图，核对元素及透明边缘、明暗底、线条与读数可辨识、无遮挡/裁切、起止语义和图面简洁后，分别记录`pass/fail/unverified`。原生guide还须回读真实属性，PNG或普通线条不能替代该证据。自动几何、PNG哈希、代理图面评审、用户验收和真机验证分别记录，不替用户宣称视觉通过。
+视觉报告的`position_annotation_review`数组逐`frame_id`建立记录，初始`status:unverified`、`evidence:null`、`export_receipt:null`、`notes:""`，`evidence:{path,sha256}`指向评审目录内当前真实1×PNG；`export_receipt`必须使用下述实际采集回执，不允许仅凭同尺寸PNG路径自证；`snapshot_fingerprint`由模板自动绑定当前快照，`notes`记录实际逐图评审说明；报告外层`snapshot_sha256`绑定本轮快照。实际查看每张图，核对元素及透明边缘、明暗底、线条与读数可辨识、无遮挡/裁切、起止语义和图面简洁后，分别记录`pass/fail/unverified`。原生guide还须回读真实属性，PNG或普通线条不能替代该证据。自动几何、PNG哈希、代理图面评审、用户验收和真机验证分别记录，不替用户宣称视觉通过。
 
 母件尺寸、裁切、轴心、显示定位、进度量程或路径变化后，同步更新相关标注、清单及正式引用；受影响的旧快照、PNG与评审结论立即失效。重新采集、输出受影响FRAME的1×PNG并逐项评审，不用同名节点、相同ID或旧通过报告证明当前版本。
+
+
+## 标注PNG的同轮采集
+
+先完成全量稳定快照，再调用同一采集器：`await collectSnapshot({...config, profile:"validation", limit:1, annotation_export_id:frameId})`。一次指定一个本分区内、不设正式导出的标注FRAME；禁止与`preflight`组合。返回的`annotation_export`包含真实节点ID、固定1×设置、原始PNG字节FNV、导出前后全组签名和base64。该单页仅作PNG采集回执，不能冒充完整快照，也不改节点的`exportSettings`。
+
+保存原始回读与PNG后，复用`run_evidence.start_run(..., purpose="annotation")`建立独立标注轮次，以当前完整快照及返回的`annotation_export`调用：
+
+```python
+run = start_run(requirements, snapshot, purpose="annotation")
+capture = raw_page["annotation_export"]
+receipt = record_export(run, snapshot, frame_id, relative_png, review_dir,
+                        capture["setting"], capture["source_before"], capture["source_after"],
+                        annotation_capture=capture)
+```
+
+收齐所有标注后使用`validate_run(run, requirements, snapshot, review_dir)`核对独立标注轮次。默认正式轮次不允许混写标注，标注轮次也不接收正式切图。将返回值完整填入该图的`export_receipt`，`evidence.path/sha256`取同一回执。校验核对画框、轮次、快照/资源指纹、真实字节及SHA-256；不同画框不能互换回执。FNV用于发现同次原始字节不一致，不代替SHA-256或图面评审。旧报告保留原字节；缺少新版回执仅显示未验证，重新采集后再评审。
+
+规则路径检查沿真实拓扑覆盖所有曲线段，拒绝共线回折、越过起止、圆弧中途反向或额外绕圈；合法跨零角度和镜像保留。来源1×还要求正交及有效行列式，规则圆的复合变换须等比。数值界限无法证明时保守拒绝，不能用少量采样点通过代替全路径检查。

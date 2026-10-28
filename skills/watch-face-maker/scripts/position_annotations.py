@@ -47,6 +47,88 @@ def _rgb(paints):
     return [_number(visible[0]['color'].get(k)) for k in ('r', 'g', 'b')]
 
 
+def _regular_transform(t, unit=False):
+    x, y = [math.hypot(t[0][i], t[1][i]) for i in (0, 1)]
+    if min(x, y) <= 1e-7: return False
+    dot = t[0][0]*t[0][1]+t[1][0]*t[1][1]
+    determinant = t[0][0]*t[1][1]-t[0][1]*t[1][0]
+    return _close([x, y, dot, abs(determinant)], [1, 1, 0, 1]) if unit else _close([x/y, dot/(x*y), abs(determinant)/(x*y)], [1, 0, 1])
+
+
+def _ordered_curves(n, ends):
+    network = n['vectorNetwork']; vertices = network['vertices']
+    current = next(i for i, v in enumerate(vertices) if v is ends[0])
+    remaining = list(network['segments']); curves = []
+    while remaining:
+        segment = next(s for s in remaining if current in (s['start'], s['end']))
+        remaining.remove(segment)
+        start, end = segment['start'], segment['end']
+        p, q = ([vertices[i][k] for k in ('x', 'y')] for i in (start, end))
+        handles = [segment.get(k, {'x': 0, 'y': 0}) for k in ('tangentStart', 'tangentEnd')]
+        curve = [p, [p[i]+handles[0][k] for i, k in enumerate(('x', 'y'))],
+                 [q[i]+handles[1][k] for i, k in enumerate(('x', 'y'))], q]
+        if current == end: curve.reverse()
+        curves.append(curve); current = end if current == start else start
+    return curves
+
+
+def _split(values):
+    # de Casteljau subdivision preserves the exact curve and its convex-hull bound.
+    left, right = [values[0]], [values[-1]]
+    while len(values) > 1:
+        values = [(a+b)/2 for a, b in zip(values, values[1:])]
+        left.append(values[0]); right.append(values[-1])
+    return left, list(reversed(right))
+
+
+def _bounded(values, lower, upper, depth=0):
+    if min(values) >= lower and max(values) <= upper: return True
+    if not lower <= values[0] <= upper or not lower <= values[-1] <= upper: return False
+    if depth == 24: return False  # 无法证明整段落在界内时保守拒绝，不能采样放行。
+    return all(_bounded(part, lower, upper, depth+1) for part in _split(values))
+
+
+def _product(a, b):
+    m, n = len(a)-1, len(b)-1
+    return [sum(math.comb(m, i)*math.comb(n, k-i)*a[i]*b[k-i]
+                for i in range(max(0, k-n), min(m, k)+1))/math.comb(m+n, k)
+            for k in range(m+n+1)]
+
+
+def _linear_curves(curves):
+    start, end = curves[0][0], curves[-1][-1]
+    delta = [end[i]-start[i] for i in (0, 1)]; length = math.hypot(*delta)
+    for curve in curves:
+        position = [sum((p[i]-start[i])*delta[i] for i in (0, 1))/(length*length) for p in curve]
+        derivative = [3*(b-a) for a, b in zip(position, position[1:])]
+        if not _bounded(derivative, -1e-9, math.inf): raise ValueError('直线路径超出端点或发生反向回折')
+
+
+def _sweep(x, y, depth=0):
+    # 控制点全部位于起始半平面时，整段不可能隐藏额外半圈。
+    if min(x[0]*a+y[0]*b for a, b in zip(x, y)) > 0:
+        return math.atan2(x[0]*y[-1]-y[0]*x[-1], x[0]*x[-1]+y[0]*y[-1])
+    if depth == 24: raise ValueError('圆弧完整扫角无法证明')
+    return sum(_sweep(a, b, depth+1) for a, b in zip(_split(x), _split(y)))
+
+
+def _arc_curves(curves, center, direction):
+    radius = math.dist(curves[0][0], center); tolerance = max(.05, radius*.001)
+    if radius <= tolerance: raise ValueError('圆弧半径无效')
+    sign = 1 if direction == 'clockwise' else -1; sweep = 0
+    for curve in curves:
+        x, y = ([p[i]-center[i] for p in curve] for i in (0, 1))
+        squared_radius = [a+b for a, b in zip(_product(x, x), _product(y, y))]
+        if not _bounded(squared_radius, (radius-tolerance)**2, (radius+tolerance)**2):
+            raise ValueError('开放路径并非登记轴心的规则圆弧')
+        dx, dy = ([3*(b-a) for a, b in zip(values, values[1:])] for values in (x, y))
+        cross = [sign*(a-b) for a, b in zip(_product(x, dy), _product(y, dx))]
+        if not _bounded(cross, -1e-7, math.inf): raise ValueError('进度方向与开放路径完整切线不符')
+        sweep += _sweep(x, y)
+    if not 0 < sign*sweep < 2*math.pi-.001: raise ValueError('圆弧完整扫角范围无效')
+    return sign*sweep
+
+
 def _line(n, nodes, root, color=None, legacy=False):
     t = _transform(n, nodes, root)
     if legacy and n['type'] == 'RECTANGLE':
@@ -61,6 +143,7 @@ def _line(n, nodes, root, color=None, legacy=False):
         elif n['type'] == 'VECTOR':
             vertices, linear = _open_network(n)
             if not linear: raise ValueError(n['id']+':尺寸线必须是开放直线')
+            _linear_curves(_ordered_curves(n, vertices))
             ends = [[v['x'], v['y']] for v in vertices]
         else: raise ValueError(n['id']+':尺寸线须为LINE或开放VECTOR')
     if color == 'red' and not _close(_rgb(paints), [1, 0, 0]): raise ValueError(n['id']+':终点/尺寸线须为红色')
@@ -130,7 +213,7 @@ def _progress(a, nodes, frame, master, image):
     if path['type'] == 'ELLIPSE' and shape in ('arc', 'circle'):
         w, h = path['width'], path['height']; arc = path.get('arcData')
         if arc is None: raise LookupError('缺少进度实际arcData')
-        if w <= 0 or not _close([w], [h]): raise ValueError('进度不是规则圆形')
+        if w <= 0 or not _close([w], [h]) or not _regular_transform(pt): raise ValueError('进度不是规则圆形')
         actual_center = transform([w/2, h/2])
         if not _close(center, actual_center): raise ValueError('进度标注轴心与实际几何不符')
         start, end = [_number(arc[k]) for k in ('startingAngle', 'endingAngle')]
@@ -146,35 +229,15 @@ def _progress(a, nodes, frame, master, image):
         if path['type'] == 'LINE': points = [[0, 0], [path['width'], path['height']]]; linear = True
         else:
             vertices, linear = _open_network(path); points = [[v['x'], v['y']] for v in vertices]
+            curves = _ordered_curves(path, vertices)
+            if linear: _linear_curves(curves)
         if linear != (shape == 'linear'): raise ValueError('进度形态与原始路径不符')
         endpoints = [transform(p) for p in points]
         if shape == 'arc':
-            # 开放向量的完整起止与业务增长方向由已确认映射给出；端点必须落在同一轴心圆上。
             if abs(math.dist(endpoints[0], center)-math.dist(endpoints[1], center)) > .001: raise ValueError('圆弧端点不共圆')
-            radius=math.dist(endpoints[0], center)
-            for seg in path['vectorNetwork']['segments']:
-                verts=path['vectorNetwork']['vertices'];p0=verts[seg['start']];p3=verts[seg['end']]
-                h0=seg.get('tangentStart',{'x':0,'y':0});h3=seg.get('tangentEnd',{'x':0,'y':0})
-                controls=[[p0[k] for k in ('x','y')],[p0[k]+h0[k] for k in ('x','y')],
-                          [p3[k]+h3[k] for k in ('x','y')],[p3[k] for k in ('x','y')]]
-                # 原生三次曲线允许圆弧近似误差；不能只验两个等半径端点。
-                for sample in range(17):
-                    u=sample/16;weights=[(1-u)**3,3*(1-u)**2*u,3*(1-u)*u*u,u**3]
-                    p=transform([sum(weights[j]*controls[j][i] for j in range(4)) for i in (0,1)])
-                    if abs(math.dist(p,center)-radius)>max(.05,radius*.001):raise ValueError('开放路径并非登记轴心的规则圆弧')
-            network=path['vectorNetwork'];start_index=network['vertices'].index(vertices[0])
-            segment=next(seg for seg in network['segments'] if start_index in (seg['start'],seg['end']))
-            forward=segment['start']==start_index;other=segment['end'] if forward else segment['start']
-            handle=segment.get('tangentStart' if forward else 'tangentEnd',{'x':0,'y':0})
-            tangent=[handle['x'],handle['y']]
-            if math.hypot(*tangent)<1e-7:
-                tangent=[network['vertices'][other][k]-vertices[0][k] for k in ('x','y')]
-            next_point=transform([points[0][i]+tangent[i] for i in (0,1)])
-            radial=[endpoints[0][i]-center[i] for i in (0,1)]
-            delta=[next_point[i]-endpoints[0][i] for i in (0,1)]
-            cross=radial[0]*delta[1]-radial[1]*delta[0]
-            if abs(cross)<1e-7:raise LookupError('实际切线无法证明进度方向')
-            if (cross>0)!=(direction=='clockwise'):raise ValueError('进度方向与开放路径切线不符')
+            sweep = _arc_curves([[transform(p) for p in curve] for curve in curves], center, direction)
+            expected = ((a['start_angle']-a['end_angle']) if direction == 'clockwise' else (a['end_angle']-a['start_angle'])) % 360
+            if abs(math.degrees(sweep)-expected) > .001: raise ValueError('圆弧完整扫角与登记范围不符')
     else: raise LookupError('进度完整路径尚无法证明')
     for index, key in enumerate(('start', 'end')):
         line = _get(nodes, a[key+'_line_id']); ends = _line(line, nodes, root, 'yellow' if index == 0 else 'red')
@@ -272,7 +335,7 @@ def validate_position_annotations(s, nodes):
                 if not owner: raise ValueError('来源不是正式显示实例')
                 _visible(source, nodes, owner)
                 t = _transform(source, nodes, owner)
-                if not _close([math.hypot(t[0][i], t[1][i]) for i in (0, 1)], [1, 1]): raise ValueError('显示来源不是1×')
+                if not _regular_transform(t, unit=True): raise ValueError('显示来源不是正交1×')
                 if a['kind'] == 'progress' and not _close(sum(t, []), sum(_transform(image, nodes, frame['id']), [])):
                     raise ValueError('进度标注与正式来源定位不符')
                 if a['kind'] != 'progress':
@@ -336,7 +399,7 @@ def _fingerprint(snapshot):
 def annotation_review_template(snapshot):
     entries = snapshot.get('position_annotations') or []
     ids = sorted({a['frame_id'] for a in entries if isinstance(a, dict) and isinstance(a.get('frame_id'), str)})
-    return [dict(frame_id=id, status='unverified', snapshot_fingerprint=_fingerprint(snapshot), evidence=None, notes='') for id in ids]
+    return [dict(frame_id=id, status='unverified', snapshot_fingerprint=_fingerprint(snapshot), evidence=None, export_receipt=None, notes='') for id in ids]
 
 
 def validate_annotation_review(snapshot, review, base):
@@ -364,6 +427,19 @@ def validate_annotation_review(snapshot, review, base):
             path = (base/relative).resolve()
             if not path.is_relative_to(base.resolve()): raise ValueError('标注PNG越出评审目录')
             if hashlib.sha256(path.read_bytes()).hexdigest() != evidence.get('sha256'): raise ValueError(id+':标注PNG哈希不符')
+            receipt = item.get('export_receipt')
+            if not isinstance(receipt, dict) or not isinstance(receipt.get('annotation_capture'), dict):
+                raise LookupError(id+':缺少同轮实际画框PNG导出回执')
+            from run_evidence import check_annotation_capture, digest, resource_fingerprint
+            if (receipt.get('node_id') != id or receipt.get('path') != relative
+                    or receipt.get('sha256') != evidence.get('sha256') or receipt.get('purpose') != 'annotation'
+                    or receipt.get('status') != 'verified' or not isinstance(receipt.get('run_id'), str) or not receipt['run_id']
+                    or receipt.get('snapshot_sha256') != digest(snapshot)
+                    or receipt.get('resource_sha256') != resource_fingerprint(snapshot, id)
+                    or receipt.get('dimensions') != [nodes[id]['width'], nodes[id]['height']]):
+                raise ValueError(id+':标注PNG回执不属于当前画框或快照')
+            check_annotation_capture(snapshot, id, path, receipt.get('setting'), receipt.get('source_before'),
+                                     receipt.get('source_after'), receipt['annotation_capture'])
             from PIL import Image
             with Image.open(path) as image:
                 image.load()

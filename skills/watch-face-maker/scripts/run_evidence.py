@@ -69,12 +69,17 @@ def resource_fingerprint(snapshot, node_id):
     return digest(included)
 
 
-def start_run(requirements, snapshot):
+def start_run(requirements, snapshot, *, purpose='production'):
+    if purpose not in ('production', 'annotation'):
+        raise ValueError('未知导出轮次用途')
     if not stable_snapshot(snapshot):
         raise ValueError('缺少采集前后稳定签名，不能建立本轮导出证据')
-    return {'run_id': str(uuid4()), 'requirements_sha256': digest(requirements),
+    run = {'run_id': str(uuid4()), 'requirements_sha256': digest(requirements),
             'snapshot_sha256': digest(snapshot), 'scope_sha256': digest(snapshot['config']),
             'capture_signature': snapshot['capture_signature'], 'status': 'active', 'files': []}
+    if purpose == 'annotation':
+        run['purpose'] = purpose
+    return run
 
 
 def safe_path(directory, relative):
@@ -101,13 +106,44 @@ def png_dimensions(path):
         raise ValueError('实际PNG不完整或无法解析') from exc
 
 
-def record_export(run, snapshot, node_id, relative, directory, setting, before_signature, after_signature):
+def png_byte_signature(path):
+    """与Figma采集回执的原始PNG字节FNV一致；文件完整性仍以SHA-256核对。"""
+    value = 2166136261
+    for byte in Path(path).read_bytes():
+        value = ((value ^ byte) * 16777619) & 0xffffffff
+    return format(value, 'x')
+
+
+def check_annotation_capture(snapshot, node_id, path, setting, before, after, capture):
+    frames = {a.get('frame_id') for a in snapshot.get('position_annotations', []) if isinstance(a, dict)}
+    node = next((n for n in snapshot['nodes'] if n['id'] == node_id), {})
+    if (not stable_snapshot(snapshot) or node_id not in frames or node.get('type') != 'FRAME'
+            or node.get('export_settings') or any(e.get('node_id') == node_id for e in snapshot.get('export_items', []))):
+        raise ValueError('标注临时导出需要本轮已登记且不正式导出的FRAME')
+    expected = {'format': 'PNG', 'constraint': {'type': 'SCALE', 'value': 1}}
+    if setting != expected or not isinstance(capture, dict):
+        raise ValueError('标注必须提供实际1×PNG采集回执')
+    if (capture.get('node_id') != node_id or capture.get('setting') != expected
+            or capture.get('source_before') != before or capture.get('source_after') != after
+            or before != after or before != snapshot['capture_signature']
+            or capture.get('png_fnv1a32') != png_byte_signature(path)):
+        raise ValueError('标注PNG与实际画框、原始导出字节或采集签名不符')
+    if not resource_fingerprint(snapshot, node_id):
+        raise ValueError('标注来源或实例依赖不完整')
+    if png_dimensions(path) != [node.get('width'), node.get('height')]:
+        raise ValueError('标注PNG不是目标FRAME的原生1×尺寸')
+    return {key: capture[key] for key in ('node_id', 'setting', 'source_before', 'source_after', 'png_fnv1a32')}
+
+
+def record_export(run, snapshot, node_id, relative, directory, setting, before_signature, after_signature, *, annotation_capture=None):
+    if (annotation_capture is not None) != (run.get('purpose') == 'annotation'):
+        raise ValueError('标注临时导出必须使用独立annotation轮次，不得混入正式导出')
     if run['status'] != 'active' or digest(snapshot) != run['snapshot_sha256']:
         raise ValueError('轮次停止或快照改变，不能沿用导出记录')
     if before_signature != after_signature or before_signature != run['capture_signature']:
         raise ValueError('导出前后来源改变，请重新采集')
     node = next(n for n in snapshot['nodes'] if n['id'] == node_id)
-    if setting not in node.get('export_settings', []):
+    if annotation_capture is None and setting not in node.get('export_settings', []):
         raise ValueError('实际导出设置不属于该节点')
     path = safe_path(directory, relative)
     dimensions = png_dimensions(path)
@@ -116,6 +152,10 @@ def record_export(run, snapshot, node_id, relative, directory, setting, before_s
                'source_before': before_signature, 'source_after': after_signature,
                'resource_sha256': resource_fingerprint(snapshot, node_id),
                'sha256': file_hash(path), 'status': 'verified'}
+    if annotation_capture is not None:
+        receipt['annotation_capture'] = check_annotation_capture(snapshot, node_id, path, setting,
+                                                                 before_signature, after_signature, annotation_capture)
+        receipt['purpose'] = 'annotation'
     run['files'] = [r for r in run['files'] if r['path'] != relative] + [receipt]
     return receipt
 
@@ -141,8 +181,10 @@ def validate_run(run, requirements, snapshot, directory):
         if run.get(key) != value:
             errors.append(f'本轮绑定不匹配：{key}')
     nodes = {n['id']: n for n in snapshot['nodes']}
-    expected = {(r['node_id'], r['path']) for r in snapshot.get('export_items', [])}
-    actual = {(r['node_id'], r['path']) for r in run.get('files', [])}
+    annotation = run.get('purpose') == 'annotation'
+    expected = ({a.get('frame_id') for a in snapshot.get('position_annotations', []) if isinstance(a, dict)} if annotation
+                else {(r['node_id'], r['path']) for r in snapshot.get('export_items', [])})
+    actual = {r['node_id'] if annotation else (r['node_id'], r['path']) for r in run.get('files', [])}
     if not expected or expected != actual or len(actual) != len(run.get('files', [])):
         errors.append('本轮导出映射缺失、重复或与快照不一致')
     for r in run.get('files', []):
@@ -152,12 +194,17 @@ def validate_run(run, requirements, snapshot, directory):
             errors.append(f'导出映射与实际设置不一致：{r["path"]}')
         if (r.get('run_id') != run.get('run_id') or r.get('snapshot_sha256') != digest(snapshot)
                 or r.get('source_before') != snapshot.get('capture_signature') or r.get('source_after') != snapshot.get('capture_signature')
-                or r.get('setting') not in node.get('export_settings', [])):
+                or (not annotation and r.get('setting') not in node.get('export_settings', []))):
             errors.append(f'资源来源或导出设置不匹配：{r["path"]}')
         if not reuse_proof_valid(r, snapshot):
             errors.append(f'跨版本复用证据不匹配：{r["path"]}')
         try:
             path = safe_path(directory, r['path'])
+            if annotation:
+                check_annotation_capture(snapshot, r['node_id'], path, r.get('setting'), r.get('source_before'),
+                                         r.get('source_after'), r.get('annotation_capture'))
+                if r.get('purpose') != 'annotation' or r.get('resource_sha256') != resource_fingerprint(snapshot, r['node_id']):
+                    errors.append('标注资源指纹或用途不匹配：'+r['path'])
             if (r.get('status') != 'verified' or file_hash(path) != r['sha256']
                     or png_dimensions(path) != r.get('dimensions')):
                 errors.append(f'文件已变化或不能复用：{r["path"]}')

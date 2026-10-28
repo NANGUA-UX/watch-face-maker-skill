@@ -20,6 +20,11 @@ async function collectSnapshot(config) {
   if (!Array.isArray(annotationIds) || annotationIds.some(id => typeof id !== 'string' || !id)
       || new Set(annotationIds).size !== annotationIds.length) throw new Error('位置标注路径采集ID须为无重复字符串数组');
   const annotationPaths = new Set(annotationIds);
+  const annotationExportId = config.annotation_export_id;
+  if (annotationExportId !== undefined && (typeof annotationExportId !== 'string' || !annotationExportId.trim())) {
+    throw new Error('标注PNG导出ID须为单个非空字符串');
+  }
+  if (annotationExportId !== undefined && profile === 'preflight') throw new Error('preflight不能采集标注PNG导出证据');
 
   const section = await figma.getNodeByIdAsync(config.section_id);
   if (!section) throw new Error(`找不到 section：${config.section_id}`);
@@ -37,6 +42,7 @@ async function collectSnapshot(config) {
     }
   };
   visit(section);
+  const annotationFrame = annotationExportId === undefined ? null : allNodes.find(node => node.id === annotationExportId);
   // 角色必须是本分区内实际读取的不同节点；样稿不补造派生稿或资源板。
   const registered = roleKeys.filter(key => config[key]);
   if (registered.some(key => !seen.has(config[key]))) throw new Error("采集角色不在指定分区内");
@@ -224,6 +230,21 @@ async function collectSnapshot(config) {
     bytes += recordBytes;
   }
 
+  let annotationExport;
+  if (annotationExportId !== undefined) {
+    let parent = annotationFrame;
+    while (parent && parent !== section) parent = parent.parent;
+    if (!annotationFrame || parent !== section || annotationFrame.type !== 'FRAME'
+        || !Array.isArray(annotationFrame.exportSettings) || annotationFrame.exportSettings.length) {
+      throw new Error('标注PNG导出节点须为本分区内且无正式导出设置的FRAME');
+    }
+    const setting = {format:'PNG', constraint:{type:'SCALE', value:1}};
+    const png = await annotationFrame.exportAsync(setting);
+    let hash = 2166136261;
+    for (const byte of png) hash = Math.imul(hash ^ byte, 16777619) >>> 0;
+    annotationExport = {node_id:annotationFrame.id, setting, png_fnv1a32:hash.toString(16),
+      base64:figma.base64Encode(png)};
+  }
   const refsAfter = await references();
   const afterSignature = signatureOf(refsAfter);
   if (signature !== afterSignature) throw new Error("采集期间内容或母件引用变化，请重新采集");
@@ -234,6 +255,8 @@ async function collectSnapshot(config) {
     stability: {before: signature, after: afterSignature, status: "pass", algorithm: "fnv1a32-content-v3"},
     captured_at: new Date().toISOString(),
     capture_signature: signature,
+    ...(annotationExport ? {annotation_export:{...annotationExport,
+      source_before:signature, source_after:afterSignature}} : {}),
     config: plain(Object.fromEntries(Object.entries({...config, stage})
       .filter(([key, value]) => !roleKeys.includes(key) || value))),
     nodes: records,
