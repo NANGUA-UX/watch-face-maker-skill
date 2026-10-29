@@ -107,6 +107,25 @@ def _open_network(node):
     return [vertices[i] for i in ends],linear
 
 
+def ellipse_geometry(path,shape):
+    """复核原生圆弧/整圆的中心曲线；绘制与端帽由调用方另行核对。"""
+    if path.get('type')!='ELLIPSE':raise LookupError('缺少原生椭圆几何证据')
+    if shape not in ('arc','circle'):raise ValueError('原生椭圆与登记形态不符')
+    w,h=_number(path.get('width')),_number(path.get('height'))
+    if min(w,h)<=0 or abs(w-h)>1e-5:raise ValueError('原生圆弧或整圆须为非退化正圆')
+    arc=path.get('arcData')
+    if arc is None:raise LookupError('缺少原生椭圆实际arcData')
+    if not isinstance(arc,dict):raise ValueError('原生椭圆arcData无效')
+    start,end=[_number(arc.get(k)) for k in ('startingAngle','endingAngle')]
+    sweep=abs(end-start);inner=_number(arc.get('innerRadius'))
+    if shape=='circle':
+        if abs(sweep-2*math.pi)>1e-5 or inner not in (0,1):
+            raise ValueError('整圆实际为部分扇区或双边圆环')
+    elif not 1e-7<sweep<2*math.pi-1e-5 or inner!=1:
+        raise ValueError('原生圆弧须为不足一圈的单中心曲线，不能是扇区或双边圆环')
+    return w,h,start,end
+
+
 def _entry(entry,nodes,section):
     if not isinstance(entry,dict):raise ValueError('stroke_geometry条目必须是对象')
     root_id,path_id=entry.get('root_id'),entry.get('path_id')
@@ -132,23 +151,19 @@ def _entry(entry,nodes,section):
     if _number(path.get('stroke_weight',path.get('strokeWeight')))<=0:raise ValueError('描边宽度须为正数')
     if path.get('isMask'):raise ValueError('描边路径不能作为遮罩')
     kind=path.get('type');ends=[]
-    if shape=='circle':
-        if kind!='ELLIPSE':raise LookupError('整圆须提供原生椭圆闭环证据')
-        w,h=_number(path.get('width')),_number(path.get('height'))
-        arc=path.get('arcData')
-        if not isinstance(arc,dict):raise LookupError('缺少整圆实际arcData')
-        sweep=abs(_number(arc.get('endingAngle'))-_number(arc.get('startingAngle')))
-        if w<=0 or abs(w-h)>1e-5 or abs(sweep-2*math.pi)>1e-5 or _number(arc.get('innerRadius'))!=0:
-            raise ValueError('整圆实际为非圆、部分扇区或双边圆环')
-        return
-    if kind=='LINE' and shape=='linear':
+    if kind=='ELLIPSE':
+        ellipse_geometry(path,shape)
+        if shape=='circle':return
+        ends=[{},{}]
+    elif shape=='circle':raise LookupError('整圆须提供原生椭圆闭环证据')
+    elif kind=='LINE' and shape=='linear':
         if math.hypot(_number(path.get('width')),_number(path.get('height')))<1e-7:raise ValueError('直线长度为零')
         ends=[{},{}]
     elif kind=='VECTOR':
         ends,linear=_open_network(path)
         if (shape=='linear')!=linear:raise ValueError('实际路径曲直与登记形态不符')
     else:
-        raise LookupError('缺少可证明开放性的描边路径，不能仅凭arcData判通过')
+        raise LookupError('缺少可证明开放性的描边路径')
     for vertex in ends:
         actual=vertex.get('strokeCap',path.get('strokeCap'))
         if actual is None or actual=='mixed':raise LookupError('缺少端点实际样式或顶点覆盖')

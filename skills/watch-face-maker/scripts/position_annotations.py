@@ -3,7 +3,7 @@ import math
 import re
 from pointer_checks import _screen_transform, transform_at
 from screen_geometry import screen_spec
-from stroke_geometry import _number, _open_network, _painted, _under
+from stroke_geometry import _number, _open_network, _painted, _under, ellipse_geometry
 
 
 def _close(a, b):
@@ -211,12 +211,10 @@ def _progress(a, nodes, frame, master, image):
     direction = a['direction']
     if direction not in ('clockwise', 'counterclockwise'): raise ValueError('进度方向无效')
     if path['type'] == 'ELLIPSE' and shape in ('arc', 'circle'):
-        w, h = path['width'], path['height']; arc = path.get('arcData')
-        if arc is None: raise LookupError('缺少进度实际arcData')
+        w, h, start, end = ellipse_geometry(path, shape)
         if w <= 0 or not _close([w], [h]) or not _regular_transform(pt): raise ValueError('进度不是规则圆形')
         actual_center = transform([w/2, h/2])
         if not _close(center, actual_center): raise ValueError('进度标注轴心与实际几何不符')
-        start, end = [_number(arc[k]) for k in ('startingAngle', 'endingAngle')]
         determinant=pt[0][0]*pt[1][1]-pt[0][1]*pt[1][0]
         clockwise = (end-start)*determinant > 0
         # 单独验证方向，防止端点角度正确却改变实际增长方向。

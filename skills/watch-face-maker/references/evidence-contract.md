@@ -29,7 +29,7 @@
 - 同一共享数据族的`node_ids`必须包含对应符号和单位；`shared_data_policy.symbol_resources`记录`node_id`、实际`character`与目标`path`，检查遗漏改名或漏纳入统一高度的资源。`vertical_padding`默认0，按完整字形确定最小高度；旧族确需保留额外上下余量时显式记录该值与项目理由。
 - `state_families: [{"name": "weather", "node_name_prefix": "Dial1/Weather/", "expected_count": 48, "start_index": 0, "index_width": 3}]`
 - `stroke_geometry: [{"root_id":"...", "path_id":"...", "role":"progress|track|decoration", "shape":"arc|linear|circle", "cap":"NONE|ROUND|SQUARE"}]`：登记规则进度、底轨和装饰线的专用逻辑根与实际路径。采集配置 `stroke_geometry_node_ids` 为全部 `path_id`；validation 模式仅为这些节点保留原始 `vectorNetwork/vectorPaths`，样式及端点继续参与同轮签名与资源指纹。检查无可见填充、有效正宽描边、真实开放拓扑及端点覆盖，完整椭圆闭环无需端点；逻辑根内额外几何（包括隐藏端帽）失败。缺清单/原始拓扑为未验证，不修改旧报告；确无适用对象可显式空数组，但须人工核对清单完整性。详见[描边与端点](stroke-geometry.md)。
-- `native_progress: [{"capability":"battery", "node_id":"...", "shape":"arc|linear", "framework_capability_source":"..."}]`：仅用于清单 `capability_modes` 已选择 `native_continuous` 的能力。`node_id` 指向资源分区内不导出PNG的可编辑示意母件，并列入 `source_only_node_ids`。关联其子树内 `stroke_geometry.role=progress` 路径：开放 VECTOR/LINE 保留真实网络/原生直线证据，整圆椭圆保留实际 `arcData`；不能仅因有 `arcData` 就通过，也不要求开放 VECTOR 必须有该字段。此证据不证明固件接入或真机运行。
+- `native_progress: [{"capability":"battery", "node_id":"...", "shape":"arc|linear", "framework_capability_source":"..."}]`：仅用于清单 `capability_modes` 已选择 `native_continuous` 的能力。`node_id` 指向资源分区内不导出PNG的可编辑示意母件，并列入 `source_only_node_ids`。关联其子树内 `stroke_geometry.role=progress` 路径：规则圆弧优先原生ELLIPSE，保留真实arcData、正圆尺寸、innerRadius=1、无填充描边和实际端点；完整圆环核对整圈参数。开放VECTOR/LINE保留真实网络/原生直线证据；不能仅因存在arcData就通过，也不能要求合法椭圆弧提供vectorNetwork。此证据不证明固件接入或真机运行。
 - `resource_board_layout: true`：要求检查 `asset_board_id` 分区下全部直属可见节点的相交与越界，包含跨资源族母件、标题、大预览和用户保留对照节点。未声明时为未验证，不能用各状态族内部排列通过代替。
 - `animations: [{"node_ids": ["..."], "expected_count": 10, "start_index": 0}]`
 
