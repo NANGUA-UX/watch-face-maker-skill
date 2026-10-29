@@ -2,7 +2,7 @@
 import math
 from pathlib import PurePosixPath
 from pointer_checks import _screen_transform, transform_at
-from stroke_geometry import validate_stroke_geometry
+from stroke_geometry import validate_stroke_geometry, stroke_colors
 from position_annotations import validate_position_annotations, _line
 
 
@@ -74,6 +74,7 @@ def resource_board_layout(s,nodes):
 
 def native_progress(s,nodes,capability_modes=None):
     errors,unknown=[],[];entries=s.get('native_progress',[]);source_only=set(s.get('source_only_node_ids',[]))
+    exported={item.get('node_id') for item in s.get('export_items',[]) if isinstance(item,dict)}
     if isinstance(capability_modes,dict) and not entries and all(mode=='state_images' for mode in capability_modes.values()):
         return dict(id='snapshot.native_progress',status='not_applicable',explanation='已声明未使用原生连续进度',locations=[])
     if not entries:return check('native_progress',errors,['缺少原生连续进度映射'],'核对原生连续进度示意母件、可编辑几何及非PNG交付属性')
@@ -86,7 +87,11 @@ def native_progress(s,nodes,capability_modes=None):
         else:seen.add(capability)
         if not n or n.get('type')!='COMPONENT':errors.append(str(id)+':示意母件缺失');continue
         if visible(n,s.get('config',{}).get('asset_board_id'),nodes) is not True:errors.append(id+':示意母件不可见或不在资源分区')
-        if id not in source_only or n.get('export_settings'):errors.append(id+':原生示意不得作为PNG导出')
+        if id not in source_only:errors.append(id+':原生示意必须登记为source_only')
+        native_roots={id}|{child['id'] for child in nodes.values() if child.get('type')=='INSTANCE' and child.get('main_component_id')==id}
+        for child in nodes.values():
+            if (child.get('export_settings') or child['id'] in exported) and any(under(child,root,nodes) for root in native_roots):
+                errors.append(child['id']+':原生进度母件、实例及其子层不得作为切图导出')
         if shape not in ('arc','linear'):errors.append(id+':shape必须为arc或linear')
         geometry=s.get('stroke_geometry')
         if geometry is None:unknown.append(id+':缺少描边几何证据')
@@ -100,6 +105,13 @@ def native_progress(s,nodes,capability_modes=None):
                 checked=validate_stroke_geometry(s,nodes,related)
                 if checked['status']=='fail':errors.extend(id+':'+v for v in checked['locations'])
                 elif checked['status']!='pass':unknown.extend(id+':'+v for v in checked['locations'])
+                colors=set()
+                for item in related:
+                    try:
+                        colors.update(stroke_colors(nodes.get(item.get('path_id'),{})))
+                    except LookupError as exc:unknown.append(id+':'+str(exc))
+                    except (ValueError,TypeError,KeyError) as exc:errors.append(id+':'+str(exc))
+                if len(colors)>1:errors.append(id+':非纯色规则进度须使用state_images切图')
         if not isinstance(entry.get('framework_capability_source'),str) or not entry.get('framework_capability_source').strip():unknown.append(id+':缺少框架能力来源')
     return check('native_progress',sorted(set(errors)),sorted(set(unknown)),'核对原生连续进度示意母件、可编辑几何及非PNG交付属性；不代表固件接入或真机通过')
 

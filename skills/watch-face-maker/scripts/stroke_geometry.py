@@ -61,6 +61,20 @@ def _painted(paints):
     return painted
 
 
+def stroke_colors(node):
+    """从实际描边取颜色样本；图像/叠加材质不能仅凭类型证明非纯色。"""
+    paints=node.get('strokes')
+    if not _painted(paints):raise LookupError('缺少可见进度描边颜色')
+    paints=[p for p in paints if p.get('visible',True) and p.get('opacity',1)>0]
+    if len(paints)!=1:raise LookupError('多层描边颜色须另行核对')
+    paint=paints[0];opacity=paint.get('opacity',1)
+    if paint['type']=='SOLID':
+        return {tuple(paint['color'][k] for k in ('r','g','b'))+(opacity,)}
+    stops=paint['gradientStops']
+    if len({s['position'] for s in stops})<2:raise LookupError('渐变色标没有可核对的跨度')
+    return {tuple(s['color'][k] for k in ('r','g','b'))+(s['color']['a']*opacity,) for s in stops}
+
+
 def _under(identity,root,nodes):
     seen=set()
     while identity in nodes and identity not in seen:

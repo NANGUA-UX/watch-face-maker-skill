@@ -17,6 +17,7 @@ from run_evidence import safe_path, stable_snapshot, validate_run
 from pointer_checks import validate_pointers, validate_aod_pointers
 from screen_geometry import screen_spec, contains, fit_preview
 from layout_precision import precision_exemptions
+from stroke_geometry import stroke_colors
 from workflow_guards import file_sha256, verified_gate_failures, load_contract
 from visual_artifacts import comparison_images
 
@@ -981,6 +982,30 @@ def validate_snapshot(snapshot: dict, capability_modes: dict | None = None) -> l
         if family.get("shape") not in {"regular", "irregular", "segmented"} or not is_integer(segments) or segments < 1:
             progress_failures.append(str(prefix))
             continue
+        if family["shape"] == "regular":
+            if len(members) != segments + 1:progress_failures.append(str(prefix)+':状态数量不完整')
+            non_solid, color_unknown = False, False
+            geometry = snapshot.get('stroke_geometry', [])
+            geometry = geometry if isinstance(geometry,list) else []
+            for index,member in enumerate(sorted(members,key=lambda n:n.get('name',''))):
+                ids = descendants(nodes_by_id,member['id'])
+                paths = [nodes_by_id[g['path_id']] for g in geometry if isinstance(g,dict)
+                         and g.get('role')=='progress' and g.get('path_id') in ids]
+                paths = [p for p in paths if effectively_visible(p,nodes_by_id,member['id'])]
+                if not paths:
+                    if index:progress_unknown.append(member['id']+':缺少实际进度路径颜色');color_unknown=True
+                    continue
+                colors=set()
+                for path in paths:
+                    try:colors.update(stroke_colors(path))
+                    except LookupError as exc:progress_unknown.append(path['id']+':'+str(exc));color_unknown=True
+                    except (ValueError,TypeError,KeyError) as exc:progress_failures.append(path['id']+':'+str(exc))
+                non_solid = non_solid or len(colors)>1
+            if not non_solid and not color_unknown:
+                progress_failures.append(str(prefix)+':纯色规则进度使用native_continuous，不制作状态切图')
+            if family.get('include_track') is True and family.get('static_track_name') and any(n.get('name')==family['static_track_name'] for n in nodes if n.get('visible') is not False):
+                progress_failures.append(str(family.get('static_track_name')))
+            continue
         if family["shape"] in {"irregular", "segmented"} and family.get("include_track") is not True:
             progress_failures.append(str(prefix))
         if family.get("include_track") is not True:
@@ -1002,7 +1027,7 @@ def validate_snapshot(snapshot: dict, capability_modes: dict | None = None) -> l
     pointer_progress = snapshot.get("progress_representation") == "pointers" and not progress_resources and any(p.get('role') not in {'Hour','Minute','Second','Hub','HourDark','MinuteDark'} for p in snapshot.get('pointers', []))
     native_progress = bool(snapshot.get("native_progress")) and not progress_resources
     non_state_progress = pointer_progress or native_progress
-    explanation = "本次进度使用独立数据指针，转轴与范围由指针检查覆盖" if pointer_progress else ("本次进度使用原生连续控件，结构由 native_progress 检查覆盖" if native_progress else "异形或分段进度状态必须保留完整底；规则连续进度按实现模式检查")
+    explanation = "本次进度使用独立数据指针，转轴与范围由指针检查覆盖" if pointer_progress else ("本次进度使用原生连续控件，结构由 native_progress 检查覆盖" if native_progress else "非纯色规则进度及异形进度使用状态切图；异形保留完整底，纯色规则进度使用原生控件")
     checks.append(check_item("snapshot.progress_tracks", "not_applicable" if non_state_progress else ("fail" if progress_failures else ("unverified" if progress_unknown else "pass")), explanation, [] if non_state_progress else progress_failures + progress_unknown))
     source_only_ids = set(snapshot.get("source_only_node_ids", []))
     invalid_source_only = sorted(source_only_ids - {node["id"] for node in board_components})

@@ -41,13 +41,13 @@
 
 - 数据字模先检查复用关系：同层级同字号同样式的数据不得按功能重复建立0–9母件；一档使用Num/Data，两档使用Num/Data/Large和Num/Data/Small。合并后检查实例引用、实际字符、字形位置、重复母件清除及新旧资源映射。需要保留的旧专用字模记录用户确认范围，不以资源减量为由改变未经确认的视觉层级。
 
-- 按 [背景合并与独立切图](background-composition.md) 检查源图层及实际导出，确认必须变化的内容没有固定进背景。进度按 `capability_modes` 核对：`native_continuous` 具有不导出PNG的可编辑原生示意和能力来源；`state_images` 的分段、异形或复杂材质状态保留完整底。不能仅凭“电量”名称强制一种模式。背景内部的固定元素不要求另有独立切图。
+- 按 [背景合并与独立切图](background-composition.md) 检查源图层及实际导出，确认必须变化的内容没有固定进背景。纯色规则圆弧、完整圆环和直线进度必须为 `native_continuous`，具有不导出PNG的可编辑原生示意和能力来源；非纯色规则进度及异形、异形分段进度使用 `state_images`，其中异形状态须保留完整底。能力不足不自动把纯色规则进度改成切图；缺证据记未验证。不能仅凭“电量”名称强制状态图，纯数字电量不要求进度资源。背景内部的固定元素不要求另有独立切图。
 - 本次有动画时，按 [动画切图](animation-assets.md) 检查全部帧的尺寸、顺序和导出，并复核完整播放；允许固定底随帧合成，实时数据仍须独立。未验证播放时不能声称动画交付通过。
 - 目标主画框 ID 和尺寸符合任务要求。
 - 功能模块布局容器应包住实际子内容，不能遗留无必要的整屏范围；空的旧布局容器应清理。收紧前后比较后代绝对坐标、尺寸与母件引用，并检查Active、主稿和等比缩略图同步。整屏背景、主稿及AOD不套用此收紧规则；布局容器不自动设置切图导出。
 - 使用 `state_images` 的动态字段都有对应状态族，极值和空/满状态可显示；原生连续控件不建立同名状态族。
 - 状态实际数量等于清单期望数量。
-- `weather`、`battery`、`bluetooth` 及各进度能力写入 `capabilities.requested`；有多种实现方式的能力在 `capability_modes` 声明 `state_images` 或 `native_continuous`。天气和蓝牙仍分别检查48、2个状态；电池选择状态图时检查11态，选择原生连续模式时核对 `native_progress`，不得同时保留电池状态族。
+- `weather`、`battery`、`bluetooth` 及各进度能力写入 `capabilities.requested`；进度在 `capability_modes` 按形状与颜色声明 `state_images` 或 `native_continuous`。天气和蓝牙仍分别检查48、2个状态；电池图标采用状态图时检查11态，纯色规则电量进度核对 `native_progress`，不得同时保留电池状态族。纯数字电量按 `capability_presentations.battery: numeric` 检查。
 - 名称唯一，序列从 0 连续且无缺号；单图资源没有多余序号。
 - 新字段使用 PascalCase；同一项目统一使用完整字段、缩写字段或已记录的旧项目锁定模式。
 - `naming.unresolved_terms`、`mixed_paths`、`duplicate_abbreviations` 和 `non_pascal_case_fields` 均为空。

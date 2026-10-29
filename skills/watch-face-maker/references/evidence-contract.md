@@ -29,7 +29,7 @@
 - 同一共享数据族的`node_ids`必须包含对应符号和单位；`shared_data_policy.symbol_resources`记录`node_id`、实际`character`与目标`path`，检查遗漏改名或漏纳入统一高度的资源。`vertical_padding`默认0，按完整字形确定最小高度；旧族确需保留额外上下余量时显式记录该值与项目理由。
 - `state_families: [{"name": "weather", "node_name_prefix": "Dial1/Weather/", "expected_count": 48, "start_index": 0, "index_width": 3}]`
 - `stroke_geometry: [{"root_id":"...", "path_id":"...", "role":"progress|track|decoration", "shape":"arc|linear|circle", "cap":"NONE|ROUND|SQUARE"}]`：登记规则进度、底轨和装饰线的专用逻辑根与实际路径。采集配置 `stroke_geometry_node_ids` 为全部 `path_id`；validation 模式仅为这些节点保留原始 `vectorNetwork/vectorPaths`，样式及端点继续参与同轮签名与资源指纹。检查无可见填充、有效正宽描边、真实开放拓扑及端点覆盖，完整椭圆闭环无需端点；逻辑根内额外几何（包括隐藏端帽）失败。缺清单/原始拓扑为未验证，不修改旧报告；确无适用对象可显式空数组，但须人工核对清单完整性。详见[描边与端点](stroke-geometry.md)。
-- `native_progress: [{"capability":"battery", "node_id":"...", "shape":"arc|linear", "framework_capability_source":"..."}]`：仅用于清单 `capability_modes` 已选择 `native_continuous` 的能力。`node_id` 指向资源分区内不导出PNG的可编辑示意母件，并列入 `source_only_node_ids`。关联其子树内 `stroke_geometry.role=progress` 路径：规则圆弧优先原生ELLIPSE，保留真实arcData、正圆尺寸、innerRadius=1、无填充描边和实际端点；完整圆环核对整圈参数。开放VECTOR/LINE保留真实网络/原生直线证据；不能仅因存在arcData就通过，也不能要求合法椭圆弧提供vectorNetwork。此证据不证明固件接入或真机运行。
+- `native_progress: [{"capability":"battery", "node_id":"...", "shape":"arc|linear", "framework_capability_source":"..."}]`：仅用于清单 `capability_modes` 已选择 `native_continuous` 的纯色规则进度。`node_id` 指向资源分区内不导出PNG的可编辑示意母件，并列入 `source_only_node_ids`；母件、其引用实例及全部子层均关闭导出设置，也不得直接出现在正式 `export_items` 中。关联其子树内 `stroke_geometry.role=progress` 路径：规则圆弧优先原生ELLIPSE，保留真实arcData、正圆尺寸、innerRadius=1、无填充描边和实际端点；完整圆环核对整圈参数。开放VECTOR/LINE保留真实网络/原生直线证据；不能仅因存在arcData就通过，也不能要求合法椭圆弧提供vectorNetwork。此证据不证明固件接入或真机运行。
 - `resource_board_layout: true`：要求检查 `asset_board_id` 分区下全部直属可见节点的相交与越界，包含跨资源族母件、标题、大预览和用户保留对照节点。未声明时为未验证，不能用各状态族内部排列通过代替。
 - `animations: [{"node_ids": ["..."], "expected_count": 10, "start_index": 0}]`
 
@@ -58,7 +58,7 @@ uv run --with pillow python "<SKILL_DIR>/scripts/validate_manifest.py" MANIFEST.
 - `vector_artwork_roots: [{"node_id":"...", "source":"用户确认的图标来源"}]`：仅用于保留原有矢量图标内部造型。根节点必须是FRAME、说明来源且后代不含TEXT；根本身仍检查整数位置，内部路径不强制取整。不得把功能布局、整个表盘或文字资源列入此项以绕过检查。背景内刻度文字属于整幅图案，独立文字切图则按纯TEXT/FRAME/GROUP母件识别。
 - `digit_geometry: true`：保留旧版0–9数字专项检查，不能替代整组文字检查。
 - `text_geometry: true`：当前制作必设。按原生TEXT识别完整文字切图，检查文本框宽高为正偶数整数、X/Y为整数、实际字形无切边和居中（每轴0.5px整像素取整偏差，另容许0.001px尾差）；包括符号单位、星期月份和标签。单字符标点仅自动检查水平中心，其垂直基线另附原始节点对应证据。缺少此声明或测量不足时为未验证。母件宽高4倍数规则不变。
-- `progress_resources: [{"prefix":"Dial1/Progress/Pace/","shape":"irregular","include_track":true,"segment_count":8,"static_track_name":"Static/Progress/Pace/Track"}]`：仅记录 `state_images` 进度，检查读取原始VECTOR、visible、opacity、fills；确认所有状态保留完整分段并移除背景中重复的旧底。形态允许 `regular`、`irregular`、`segmented`，不能把 `battery` 等业务名写成几何类型；此分段计数检查仅用于声明了 `segment_count` 的序列。真实PNG再比较轮廓及亮起段，不能仅凭 `include_track` 自报。
+- `progress_resources: [{"prefix":"Dial1/Progress/Pace/","shape":"irregular","include_track":true,"segment_count":8,"static_track_name":"Static/Progress/Pace/Track"}]`：仅记录 `state_images` 的非纯色规则进度或异形进度，检查读取原始VECTOR、visible、opacity、fills；异形状态保留完整分段并移除背景中重复的旧底。形态使用 `irregular`、表示异形分段的 `segmented`，或表示非纯色规则进度的 `regular`；后者复用各状态母件内的 `stroke_geometry.role=progress` 路径，读取真实 `strokes/gradientStops`，不以底轨或隐藏渐变充当颜色证据，同色渐变仍按纯色；0%允许空或隐藏。IMAGE仅有 `imageHash` 不能证明非纯色，保持未验证并补实际图面评审，不宣称自动覆盖全部材质。纯色规则圆弧、完整圆环和直线须使用 `native_progress`，不得登记为状态切图。不能把 `battery` 等业务名写成几何类型；此分段计数检查仅用于声明了 `segment_count` 的序列。真实PNG再比较轮廓及亮起段，不能仅凭 `include_track` 自报。旧报告保留；重新验证的缺失证据记未验证，不能沿用旧通过结论。
 
 ## 同轮来源绑定与断点（v2）
 
@@ -148,6 +148,6 @@ checkpoint("review/next-run.json", next_run)
 - 旧`pointers[].annotation: {frame_id, instance_id, pivot_node_id, line_node_id, offset?:[x,y]}`继续兼容原有标注的零位、轴心点和线端核对；不能代替新`position_annotations`覆盖或当前图面视觉检查，也不能据此在新标注中添加轴心圆或矩形尺寸线。并排AOD的对照偏移仍须记录，主盘和偏心小盘分别使用真实轴心；此兼容接口不改变用户要求的整屏旋转框尺寸。
 - `resource_ownership: [{master_id, behavior:"static|dynamic", destination:"background|independent", reason, independent_behavior?}]` 与 `config.background_id`：沿用已确认的逐元素拆分决定，不从节点名称推断功能。背景归属应有背景源实例、关闭独立导出并纳入已有 `source_only_node_ids`；Active/AOD不再重复组装同一固定图标。独立资源仍有正式导出，不能同时固定在背景中。静态资源确有独立行为时在 `independent_behavior` 记录具体依据，不强制合并。已烘焙且不再保留源实例的背景需另验合成像素，自动检查不得仅凭自填说明通过。
 - `resource_board_layout: true`：跨族检查整个资源分区的直属可见节点，不只检查 `state_families[].layout` 内部。相交或越界失败；检查包括用户新增审核对照，但修复不得擅自删除该节点。
-- `native_progress`：核对示意母件位于资源分区、保持可编辑圆弧/线性几何、关闭PNG导出且列入 `source_only_node_ids`。清单中的 `capability_modes` 决定是否应存在该映射；设计通过与固件/真机验证仍为不同状态。
+- `native_progress`：核对示意母件位于资源分区、保持可编辑圆弧/线性几何且列入 `source_only_node_ids`；母件、其引用实例和全部子层均无导出设置，也不直接进入正式 `export_items`；包含进度的整盘展示图仍可正常导出。清单中的 `capability_modes` 决定是否应存在该映射；设计通过与固件/真机验证仍为不同状态。
 
 新建实例、排列状态、生成标注、装配背景之后分别运行相关检查；正式导出前统一复核。修改只针对不符的原节点，重复执行应无新增或重复翻转；对用户维护区域先读取当前结构。旧的全量建盘脚本不得用于回放修复。原始节点检查、库图标实际渲染对照、裸背景源/局部/整盘视觉、用户视觉确认与设备接入保持独立记录。草稿可评审、全量生产校验、用户验收和固件验证分别报告；修正后受影响范围的旧快照、清单和报告只能作为历史记录，不能继续支撑当前通过结论。
