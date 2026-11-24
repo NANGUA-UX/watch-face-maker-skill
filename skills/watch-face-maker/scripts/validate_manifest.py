@@ -572,7 +572,7 @@ def validate_digit_geometry(nodes_by_id: dict, all_text: bool = False, baseline_
     return check_item("snapshot.text_geometry" if all_text else "snapshot.digit_geometry", status, explanation, sorted(set(failures + unknown)))
 
 
-def validate_native_even_dimensions(nodes_by_id, native_ids):
+def validate_native_even_dimensions(nodes_by_id, native_ids, library_contents=()):
     failures, unknown = [], []
     sized_types = {'FRAME', 'COMPONENT', 'INSTANCE', 'TEXT', 'RECTANGLE', 'ELLIPSE', 'POLYGON', 'STAR'}
     for identity in sorted(native_ids):
@@ -587,7 +587,7 @@ def validate_native_even_dimensions(nodes_by_id, native_ids):
             if value <= 0 or abs(value - round(value)) > .001:
                 failures.append(identity + '.' + key)
                 continue
-            if round(value) % 2 == 0:
+            if round(value) % 2 == 0 or identity in library_contents:
                 continue
             # Only a layout FRAME's measured hug axis is derived from its children.
             # Components and instances remain delivery/display bounds, even in auto layout.
@@ -603,8 +603,38 @@ def validate_native_even_dimensions(nodes_by_id, native_ids):
             failures.append(identity + '.' + key)
     return check_item('snapshot.native_even_dimensions',
                       'fail' if failures else ('unverified' if unknown or not native_ids else 'pass'),
-                      '原生可控外框宽高为正偶数；仅布局FRAME的HUG轴保留内容尺寸，字号/坐标/线宽与矢量内部路径不套用偶数规则',
+                      '原生可控外框宽高为正偶数；布局FRAME的HUG轴与已核实的切图内部库实例保留原尺寸',
                       sorted(set(failures + unknown)))
+
+
+def verified_library_icon_contents(snapshot, nodes_by_id, board_components):
+    export_ids = {item.get('node_id') for item in snapshot.get('export_items', []) if isinstance(item, dict)}
+    asset_ids = {item.get('node_id') for item in snapshot.get('export_items', [])
+                 if isinstance(item, dict) and item.get('role') == 'asset'
+                 and isinstance(item.get('path'), str) and item['path'].endswith('.png')}
+    config = snapshot['config']
+    display_roots = {config.get(role) for role in ('main_id', 'active_id', 'background_id', 'aod_id', 'preview_id', 'presentation_aod_id')}
+    masters = {node['id'] for node in board_components
+               if node['id'] in asset_ids and node['id'] not in display_roots and node.get('remote') is not True
+               and any(isinstance(setting, dict) and setting.get('format') == 'PNG'
+                       and setting.get('constraint') == {'type': 'SCALE', 'value': 1}
+                       for setting in (node.get('export_settings') or []))}
+    contents = set()
+    for entry in snapshot.get('icon_orientations', []):
+        source = entry.get('source') if isinstance(entry, dict) else None
+        if not isinstance(source, dict) or not all(isinstance(source.get(key), str) and source[key].strip()
+                                                   for key in ('file_key', 'node_id', 'key')):
+            continue
+        identity, root = entry.get('instance_id'), entry.get('root_id')
+        if not isinstance(identity, str) or not isinstance(root, str) or root not in masters:
+            continue
+        child = nodes_by_id.get(identity, {})
+        if (child.get('type') == 'INSTANCE' and child.get('parent_id') == root
+                and isinstance(child.get('main_component_id'), str) and child['main_component_id']
+                and child.get('main_component_remote') is True and child.get('main_component_key') == source['key']
+                and identity not in export_ids and not child.get('export_settings')):
+            contents.add(identity)
+    return contents
 
 
 def validate_native_pixel_values(nodes_by_id, native_ids, geometry_exempt_ids=()):
@@ -1078,6 +1108,9 @@ def validate_snapshot(snapshot: dict, capability_modes: dict | None = None, *, m
 
     precise_ids, precision_diagnostics = precision_exemptions(snapshot, nodes_by_id)
     inherited_precise = set(precise_ids)
+    library_contents = verified_library_icon_contents(snapshot, nodes_by_id, board_components)
+    inherited_library_contents = set()
+    formal_ids = {node['id'] for node in formal_nodes}
     derived_preview_ids = set()
     preview = nodes_by_id[config['preview_id']]
     fit = fit_preview(spec)
@@ -1104,6 +1137,16 @@ def validate_snapshot(snapshot: dict, capability_modes: dict | None = None, *, m
         visited.add(node["id"])
         if same_local_geometry(node, source) and source['id'] in precise_ids:
             inherited_precise.add(node['id'])
+        if (source and source['id'] in library_contents and source.get('relative_transform') is not None
+                and same_local_geometry(node, source)):
+            parent = nodes_by_id.get(node.get('parent_id'), {})
+            if (parent.get('type') == 'INSTANCE' and parent.get('main_component_remote') is False
+                    and parent.get('main_component_id') == source['parent_id']
+                    and node.get('main_component_remote') is True
+                    and node.get('main_component_key') == source['main_component_key']
+                    and node.get('main_component_id') == source.get('main_component_id')
+                    and node['id'] not in formal_ids and not node.get('export_settings')):
+                inherited_library_contents.add(node['id'])
         if not all(is_finite_number(node.get(k)) for k in ("x", "y")):
             position_unknown.append(node["id"])
         elif node["id"] not in inherited_precise:
@@ -1137,7 +1180,8 @@ def validate_snapshot(snapshot: dict, capability_modes: dict | None = None, *, m
     checks.append(check_item("snapshot.integer_positions", "fail" if position_failures else ("unverified" if position_unknown else "pass"), f"核对{len(visited)}个原生可见图层及母件根的整数X/Y；仅已验证旋转、径向和缩略图等比派生保留精度" if not position_failures else "原生布局位置精度不满足规则", position_failures + position_unknown))
     checks.append(validate_native_pixel_values(nodes_by_id, visited, inherited_precise) if snapshot.get('integer_positions') is True
                   else check_item('snapshot.native_pixel_values', 'unverified', '未声明普通布局整数要求'))
-    checks.append(validate_native_even_dimensions(nodes_by_id, visited) if snapshot.get('integer_positions') is True
+    checks.append(validate_native_even_dimensions(nodes_by_id, visited, library_contents | inherited_library_contents)
+                  if snapshot.get('integer_positions') is True
                   else check_item('snapshot.native_even_dimensions', 'unverified', '未采集原生布局尺寸'))
     relevant = [d for d in precision_diagnostics if d['kind'] == 'pointer' or d['node_id'] in visited]
     invalid = [d['node_id']+':'+d['detail'] for d in relevant if d['status'] == 'fail']
