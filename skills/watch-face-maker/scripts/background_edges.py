@@ -51,6 +51,17 @@ def _screen(width, height, shape, radius, margin=0):
         for y in range(height) for x in range(width)))
 
 
+@lru_cache(maxsize=4)
+def _full_screen_pixels(width, height, shape, radius):
+    from PIL import Image
+
+    # 圆形和圆角矩形都以屏幕中心对称，像素最远的一角在屏内即可确认整像素在屏内。
+    far_x = [x if x < width / 2 else x + 1 for x in range(width)]
+    far_y = [y if y < height / 2 else y + 1 for y in range(height)]
+    return Image.frombytes('L', (width, height), bytes(
+        255 if contains(x, y, width, height, shape, radius) else 0 for y in far_y for x in far_x))
+
+
 def _source_region(snapshot, exports, nodes, bg, size):
     from PIL import Image, ImageChops
 
@@ -200,8 +211,13 @@ def local_background_layout(snapshot, spec, nodes):
         raise ValueError('局部背景所用 Active 与目标尺寸不符')
     if active.get('clips_content') is None or active.get('cornerRadius') is None:
         raise LookupError('缺少 Active 屏形裁切属性')
-    if active['clips_content'] is not True or active['cornerRadius'] != spec['corner_radius']:
+    if (active['clips_content'] is not True or active['cornerRadius'] != spec['corner_radius']
+            or active.get('cornerSmoothing', 0) != 0):
         raise ValueError('局部背景须由 Active 统一裁为目标屏形')
+    if active.get('visible') is False or active.get('opacity', 1) != 1:
+        raise ValueError('局部背景要求 Active 可见且整体不透明度为 100%')
+    if active.get('isMask') or active.get('blendMode') not in (None, 'NORMAL', 'PASS_THROUGH'):
+        raise LookupError('Active 的遮罩或混合效果无法从 Bg 与 Ani 独立复合')
     if 'device_bg_canvas' in sequence and sequence['device_bg_canvas'] != 'screen':
         raise ValueError('明确要求整屏静态画布时须登记 device_bg_canvas=screen')
 
@@ -249,14 +265,26 @@ def local_background_layout(snapshot, spec, nodes):
         if x < 0 or y < 0 or x+size[0] > screen[0] or y+size[1] > screen[1]:
             raise ValueError('局部背景的 Bg 或 Ani 裁框超出目标尺寸')
         target = bg_layers if source == bg['id'] else ani_layers
-        target.append({'instance_id':layer['id'], 'node_id':source, 'offset':[x,y], 'size':list(size)})
+        placement = {'instance_id':layer['id'], 'node_id':source, 'offset':[x,y], 'size':list(size)}
+        target.append((placement, chain))
     if len(bg_layers) > 1 or len(ani_layers) > 1:
         raise ValueError('Active 中须各有一个可见的 Bg 与 Ani 代表帧实例')
     if not bg_layers or not ani_layers:
         raise LookupError('缺少 Active 中实际摆放的 Bg 或 Ani 代表帧')
-    bg_layer, ani_layer = bg_layers[0], ani_layers[0]
+    bg_layer, bg_chain = bg_layers[0]
+    ani_layer, ani_chain = ani_layers[0]
+    # 比较分叉处的同级分支。更深层布局不改变两个分支之间的画面层序。
+    bg_branch, ani_branch = next(
+        (left, right) for left, right in zip(reversed(bg_chain), reversed(ani_chain)) if left['id'] != right['id'])
+    parent = nodes[bg_branch['parent_id']]
+    reverse = False
+    if parent.get('layoutMode') in ('HORIZONTAL', 'VERTICAL'):
+        reverse = parent.get('itemReverseZIndex')
+        if not isinstance(reverse, bool):
+            raise LookupError('局部背景的自动布局缺少画面堆叠顺序，请重新采集')
     order = list(nodes)
-    if order.index(bg_layer['instance_id']) > order.index(ani_layer['instance_id']):
+    bg_first = order.index(bg_branch['id']) < order.index(ani_branch['id'])
+    if bg_first == reverse:
         raise ValueError('Active 中 Bg 须放在 Ani 下方')
     if sequence.get('device_bg_canvas') == 'screen' and (tuple(bg_layer['size']) != screen or bg_layer['offset'] != [0,0]):
         raise ValueError('目标设备要求整屏 Bg 画布且位于原点')
@@ -273,6 +301,8 @@ def _background_png(snapshot, exports, node):
     if (not isinstance(setting, dict) or setting.get('format') != 'PNG'
             or setting.get('constraint') != {'type':'SCALE','value':1} or setting not in settings):
         raise ValueError('背景边缘验证必须读取当前 1× PNG 导出')
+    if setting.get('contentsOnly', True) is not True:
+        raise ValueError(f'{node["id"]} 的背景 1× PNG 须只导出该母件内容（contentsOnly=true）')
     image, export, _ = _read(exports, item.get('path'))
     if image.format != 'PNG':
         raise ValueError('背景实际文件不是 PNG')
@@ -306,10 +336,18 @@ def _check_protected_region(value, exports, image, record, check):
         check('protected_region', 'fail', str(exc))
 
 
+def _check_local_background_paths(snapshot, exports, node_ids):
+    paths = [safe_path(exports, item['path']) for item in snapshot.get('export_items', [])
+             if isinstance(item, dict) and item.get('node_id') in node_ids and isinstance(item.get('path'), str)]
+    if len(set(paths)) != len(paths):
+        raise ValueError('Bg 和 Ani 的正式导出须各自指向独立路径，不能用同一个 PNG 代替其他帧')
+
+
 def _analyze_local_background(snapshot, exports, nodes, spec, record, check):
     from PIL import Image, ImageChops
 
     sequence, bg, ani = local_background_layout(snapshot, spec, nodes)
+    _check_local_background_paths(snapshot, exports, {bg['node_id'], *sequence['node_ids']})
     size = (spec['width'], spec['height'])
     source, export, setting = _background_png(snapshot, exports, nodes[bg['node_id']])
     if list(source.size) != bg['size']:
@@ -326,7 +364,7 @@ def _analyze_local_background(snapshot, exports, nodes, spec, record, check):
     missing = Image.new('L', size)
     screen = _screen(*size, spec['shape'], spec['corner_radius'])
     inner = _screen(*size, spec['shape'], spec['corner_radius'], 1)
-    core = _screen(*size, spec['shape'], spec['corner_radius'], 2)
+    full_pixels = _full_screen_pixels(*size, spec['shape'], spec['corner_radius'])
     holes = []
     for identity in sequence['node_ids']:
         node = nodes.get(identity)
@@ -340,8 +378,7 @@ def _analyze_local_background(snapshot, exports, nodes, spec, record, check):
         composite = base.copy()
         composite.alpha_composite(frame, offset)
         alpha = composite.getchannel('A')
-        gap = ImageChops.lighter(ImageChops.multiply(core, alpha.point(lambda a:255 if a < 250 else 0)),
-                                 ImageChops.multiply(inner, alpha.point(lambda a:255 if a < 128 else 0)))
+        gap = ImageChops.multiply(full_pixels, alpha.point(lambda a:255 if a < 250 else 0))
         if gap.getbbox():
             holes.append(identity)
             missing = ImageChops.lighter(missing, gap)

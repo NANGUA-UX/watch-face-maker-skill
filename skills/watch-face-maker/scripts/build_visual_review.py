@@ -12,6 +12,7 @@ from pathlib import Path
 from workflow_guards import file_sha256, load_contract
 from visual_artifacts import comparison_images
 from background_edges import analyze_background, requires_background_review
+from validate_manifest import local_animation_review_issues
 
 
 def parse_crop(value: str, width: int, height: int) -> tuple[str, tuple[int, int, int, int]]:
@@ -141,8 +142,14 @@ def main() -> int:
             for invariant in contract["reference_contract"]["invariants"]
         ],
     }
-    if requires_background_review(snapshot):
-        edge, edge_images = analyze_background(snapshot, args.exports_dir)
+    local_issues = local_animation_review_issues(manifest, snapshot, target)
+    if local_issues or requires_background_review(snapshot):
+        if local_issues:
+            edge = {"schema_version":1, "status":"unverified", "notes":"", "files":[],
+                    "auto_checks":[{"id":"inputs", "status":"unverified", "detail":"；".join(local_issues)}]}
+            edge_images = {}
+        else:
+            edge, edge_images = analyze_background(snapshot, args.exports_dir)
         edge['artifacts'] = {}
         for key, edge_image in edge_images.items():
             path = output / ('background-edge-' + key + '.png')

@@ -813,7 +813,7 @@ def validate_target_geometry(snapshot, spec):
     return result
 
 
-def validate_background_animation(snapshot, entries, board_components, nodes_by_id, spec, manifest):
+def validate_background_animation(snapshot, entries, board_components, nodes_by_id, spec, manifest, *, asset_scope=None):
     features = manifest.get("features")
     mode = features.get("background_animation") if isinstance(features, dict) else None
     if not entries:
@@ -825,7 +825,8 @@ def validate_background_animation(snapshot, entries, board_components, nodes_by_
         return [], ["缺少清单切图前缀，无法核对 Ani 与 Bg 命名"]
 
     config = snapshot["config"]
-    board_ids = descendants(nodes_by_id, config["asset_board_id"])
+    asset_scope = asset_scope or config["asset_board_id"]
+    board_ids = descendants(nodes_by_id, asset_scope)
     components = {n["id"]: n for n in board_components if n["id"] in board_ids}
     source_only = set(snapshot.get("source_only_node_ids", []))
     assets_by_id = {}
@@ -856,7 +857,7 @@ def validate_background_animation(snapshot, entries, board_components, nodes_by_
     frame_size = None
     for index, identity in enumerate(ids):
         node = components.get(identity, {})
-        if (node.get("name") != f"{ani_prefix}{index:03d}" or not effectively_visible(node, nodes_by_id, config["asset_board_id"])
+        if (node.get("name") != f"{ani_prefix}{index:03d}" or not effectively_visible(node, nodes_by_id, asset_scope)
                 or not has_1x_png(node)):
             failures.append(f"{identity}：Ani 母件名称、可见性或 1× PNG 映射有误")
             continue
@@ -877,7 +878,7 @@ def validate_background_animation(snapshot, entries, board_components, nodes_by_
         if not frame_size or any(v > limit for v, limit in zip(frame_size, screen)):
             failures.append("局部动态的公共裁框不得超出目标屏幕尺寸")
         if (len(bg_nodes) != 1 or bg_nodes[0]["id"] != bg_id
-                or not effectively_visible(bg_nodes[0], nodes_by_id, config["asset_board_id"])
+                or not effectively_visible(bg_nodes[0], nodes_by_id, asset_scope)
                 or not has_1x_png(bg_nodes[0])):
             failures.append("局部动态须有唯一一张正式导出的静态 Bg")
         else:
@@ -887,6 +888,51 @@ def validate_background_animation(snapshot, entries, board_components, nodes_by_
             if "device_bg_canvas" in sequence and (sequence["device_bg_canvas"] != "screen" or bg_size != screen):
                 failures.append("登记设备全屏画布要求时，Bg 尺寸须匹配目标屏幕")
     return failures, []
+
+
+def local_animation_review_issues(manifest, snapshot, target):
+    """用清单、目标规格与实际导出映射核对局部动画的视觉输入。"""
+    features = manifest.get("features")
+    mode = features.get("background_animation") if isinstance(features, dict) else None
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    has_local_sequence = bool(local_background_animations(snapshot))
+    if mode != "local" and not has_local_sequence:
+        return []
+    if mode != "local" or not has_local_sequence:
+        return ["局部动画须同时登记清单的 local 模式和快照中的实际序列"]
+    config = snapshot.get("config", {})
+    canvas = config.get("canvas") if isinstance(config, dict) else None
+    manifest_canvas = manifest.get("canvas")
+    if any(not isinstance(value, dict) or not {"width", "height"} <= value.keys()
+           for value in (canvas, manifest_canvas)):
+        return ["缺少清单或快照的实际屏幕尺寸，局部动画覆盖未验证"]
+    contract_canvas = dict(target)
+    if contract_canvas.get("shape") == "round_rect":
+        contract_canvas["shape"] = "rounded_rect"
+    try:
+        actual, planned, expected = map(screen_spec, (canvas, manifest_canvas, contract_canvas))
+    except ValueError as exc:
+        return [str(exc)]
+    if any(actual[key] != planned[key] or actual[key] != expected[key]
+           for key in ("width", "height", "shape", "corner_radius")):
+        return ["局部动画的实际屏幕规格与清单或合同目标不一致"]
+
+    records = snapshot.get("nodes")
+    if not isinstance(records, list):
+        return ["缺少局部动画母件的节点回读"]
+    nodes = {node["id"]: node for node in records
+             if isinstance(node, dict) and isinstance(node.get("id"), str)}
+    scope = config.get("asset_board_id")
+    if not scope and config.get("stage") == "prototype":
+        scope = config.get("section_id")
+    if not isinstance(scope, str) or scope not in nodes:
+        return ["缺少局部动画资源所属分区的回读"]
+    entries = [entry for entry in snapshot["animations"]
+               if isinstance(entry, dict) and "background_mode" in entry]
+    components = [node for node in nodes.values() if node.get("type") == "COMPONENT"]
+    failures, unknown = validate_background_animation(snapshot, entries, components, nodes, actual, manifest,
+                                                       asset_scope=scope)
+    return failures + unknown
 
 
 def validate_snapshot(snapshot: dict, capability_modes: dict | None = None, *, manifest: dict | None = None) -> list[dict]:
@@ -2087,7 +2133,10 @@ def validate_workflow_binding(
             if missing_invariants:
                 visual_errors.append("视觉预检遗漏合同不变量：" + "、".join(missing_invariants))
 
-    if isinstance(snapshot, dict) and requires_background_review(snapshot):
+    local_issues = local_animation_review_issues(manifest, snapshot, contract["target"])
+    if local_issues:
+        visual_errors.extend(local_issues)
+    elif isinstance(snapshot, dict) and requires_background_review(snapshot):
         if review is None or exports_dir is None or visual_review_path is None:
             visual_errors.append('缺少背景边缘复核输入')
         else:
