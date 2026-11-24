@@ -89,7 +89,7 @@ async function collectSnapshot(config) {
     "clipsContent", "exportSettings", "effects", "characters", "fontName", "fontSize", "strokeWeight", "strokeAlign",
     "lineHeight", "letterSpacing", "textAlignHorizontal", "textAlignVertical", "vectorPaths", "vectorNetwork",
     "textStyleId", "fillStyleId", "componentProperties", "overrides", "layoutMode", "itemSpacing", "counterAxisSpacing", "itemReverseZIndex", "constraints",
-    "cornerRadius", "primaryAxisAlignItems", "boundVariables", "paddingLeft", "paddingRight", "paddingTop", "paddingBottom",
+    "cornerRadius", "primaryAxisAlignItems", "primaryAxisSizingMode", "counterAxisSizingMode", "boundVariables", "paddingLeft", "paddingRight", "paddingTop", "paddingBottom",
     "blendMode", "isMask", "maskType", "booleanOperation", "strokeCap", "strokeJoin", "dashPattern",
     "topLeftRadius", "topRightRadius", "bottomLeftRadius", "bottomRightRadius", "cornerSmoothing",
     "strokeTopWeight", "strokeBottomWeight", "strokeLeftWeight", "strokeRightWeight", "arcData", "resolvedVariableModes", "guides"];

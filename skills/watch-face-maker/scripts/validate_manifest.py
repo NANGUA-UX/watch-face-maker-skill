@@ -572,6 +572,41 @@ def validate_digit_geometry(nodes_by_id: dict, all_text: bool = False, baseline_
     return check_item("snapshot.text_geometry" if all_text else "snapshot.digit_geometry", status, explanation, sorted(set(failures + unknown)))
 
 
+def validate_native_even_dimensions(nodes_by_id, native_ids):
+    failures, unknown = [], []
+    sized_types = {'FRAME', 'COMPONENT', 'INSTANCE', 'TEXT', 'RECTANGLE', 'ELLIPSE', 'POLYGON', 'STAR'}
+    for identity in sorted(native_ids):
+        node = nodes_by_id[identity]
+        if node.get('type') not in sized_types:
+            continue
+        for key in ('width', 'height'):
+            value = node.get(key)
+            if not is_finite_number(value):
+                unknown.append(identity + '.' + key)
+                continue
+            if value <= 0 or abs(value - round(value)) > .001:
+                failures.append(identity + '.' + key)
+                continue
+            if round(value) % 2 == 0:
+                continue
+            # Only a layout FRAME's measured hug axis is derived from its children.
+            # Components and instances remain delivery/display bounds, even in auto layout.
+            mode = node.get('layoutMode', 'NONE')
+            if node.get('type') == 'FRAME' and mode in ('HORIZONTAL', 'VERTICAL'):
+                primary = (key == 'width') == (mode == 'HORIZONTAL')
+                sizing = node.get('primaryAxisSizingMode' if primary else 'counterAxisSizingMode')
+                if sizing == 'AUTO':
+                    continue
+                if sizing != 'FIXED':
+                    unknown.append(identity + '.' + key + ':缺少布局轴尺寸模式')
+                    continue
+            failures.append(identity + '.' + key)
+    return check_item('snapshot.native_even_dimensions',
+                      'fail' if failures else ('unverified' if unknown or not native_ids else 'pass'),
+                      '原生可控外框宽高为正偶数；仅布局FRAME的HUG轴保留内容尺寸，字号/坐标/线宽与矢量内部路径不套用偶数规则',
+                      sorted(set(failures + unknown)))
+
+
 def validate_native_pixel_values(nodes_by_id, native_ids, geometry_exempt_ids=()):
     failures, unknown = [], []
 
@@ -962,6 +997,7 @@ def validate_snapshot(snapshot: dict, capability_modes: dict | None = None, *, m
         for check_id in (
             "snapshot.section_scope", "snapshot.component_names", "snapshot.component_exports",
             "snapshot.instance_links", "snapshot.assembly_layout", "snapshot.deep_composition", "snapshot.text_measurements",
+            "snapshot.native_pixel_values", "snapshot.native_even_dimensions",
             "snapshot.icon_orientation", "snapshot.state_layout", "snapshot.pointer_annotations", "snapshot.position_annotations", "snapshot.resource_ownership",
             "snapshot.resource_families", "snapshot.time_cutout_pairs", "snapshot.shared_data", "snapshot.state_families", "snapshot.time_roles", "snapshot.aod_style", "snapshot.animations", "snapshot.integer_positions", "snapshot.digit_geometry", "snapshot.text_geometry", "snapshot.progress_tracks",
         ):
@@ -1101,6 +1137,8 @@ def validate_snapshot(snapshot: dict, capability_modes: dict | None = None, *, m
     checks.append(check_item("snapshot.integer_positions", "fail" if position_failures else ("unverified" if position_unknown else "pass"), f"核对{len(visited)}个原生可见图层及母件根的整数X/Y；仅已验证旋转、径向和缩略图等比派生保留精度" if not position_failures else "原生布局位置精度不满足规则", position_failures + position_unknown))
     checks.append(validate_native_pixel_values(nodes_by_id, visited, inherited_precise) if snapshot.get('integer_positions') is True
                   else check_item('snapshot.native_pixel_values', 'unverified', '未声明普通布局整数要求'))
+    checks.append(validate_native_even_dimensions(nodes_by_id, visited) if snapshot.get('integer_positions') is True
+                  else check_item('snapshot.native_even_dimensions', 'unverified', '未采集原生布局尺寸'))
     relevant = [d for d in precision_diagnostics if d['kind'] == 'pointer' or d['node_id'] in visited]
     invalid = [d['node_id']+':'+d['detail'] for d in relevant if d['status'] == 'fail']
     unknown = [d['node_id']+':'+d['detail'] for d in relevant if d['status'] == 'unverified']

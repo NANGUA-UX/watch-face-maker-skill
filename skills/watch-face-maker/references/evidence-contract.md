@@ -56,7 +56,7 @@ uv run --with pillow python "<SKILL_DIR>/scripts/validate_manifest.py" MANIFEST.
 用户要求清除本地切图时，先完成文件检查，再清除本轮导出目录及临时预览。报告保留尺寸、哈希、检查时间和清理记录，并明确文件已经删除、复验需要重新导出。清理不得删除用户提供的参考图、背景源素材或 Figma 组件，也不得改写既有 Git 历史。
 
 - `integer_positions: true`：从资产母件及主稿/AOD/预览的原生可见层级检查局部X/Y，对已声明母件的1×显示实例同时回读；组件库矢量内部和经实际等比验证的缩略图派生单独处理。所有普通布局及文字位置使用整数；同时核对snapshot.native_pixel_values中的宽高、字号、描边、圆角、间距和阴影像素量；仅容许0.001机器尾差，不允许用显示格式化伪造精度。
-- `vector_artwork_roots: [{"node_id":"...", "source":"用户确认的图标来源"}]`：仅用于保留原有矢量图标内部造型。根节点必须是FRAME、说明来源且后代不含TEXT；根本身仍检查整数位置，内部路径不强制取整。不得把功能布局、整个表盘或文字资源列入此项以绕过检查。背景内刻度文字属于整幅图案，独立文字切图则按纯TEXT/FRAME/GROUP母件识别。
+- `vector_artwork_roots: [{"node_id":"...", "source":"用户确认的图标来源"}]`：仅用于保留原有矢量图标内部造型。根节点必须是FRAME、说明来源且后代不含TEXT；根本身仍检查整数位置和可控外框偶数尺寸，内部路径不强制取整。不得把功能布局、整个表盘或文字资源列入此项以绕过检查。背景内刻度文字属于整幅图案，独立文字切图则按纯TEXT/FRAME/GROUP母件识别。
 - `digit_geometry: true`：保留旧版0–9数字专项检查，不能替代整组文字检查。
 - `text_geometry: true`：当前制作必设。按原生TEXT识别完整文字切图，检查文本框宽高为正偶数整数、X/Y为整数、实际字形无切边和居中（每轴0.5px整像素取整偏差，另容许0.001px尾差）；包括符号单位、星期月份和标签。单字符标点仅自动检查水平中心，其垂直基线另附原始节点对应证据。缺少此声明或测量不足时为未验证。母件宽高4倍数规则不变。
 - `progress_resources: [{"prefix":"Dial1/Progress/Pace/","shape":"irregular","include_track":true,"segment_count":8,"static_track_name":"Static/Progress/Pace/Track"}]`：仅记录 `state_images` 的非纯色规则进度或异形进度，检查读取原始VECTOR、visible、opacity、fills；异形状态保留完整分段并移除背景中重复的旧底。形态使用 `irregular`、表示异形分段的 `segmented`，或表示非纯色规则进度的 `regular`；后者复用各状态母件内的 `stroke_geometry.role=progress` 路径，读取真实 `strokes/gradientStops`，不以底轨或隐藏渐变充当颜色证据，同色渐变仍按纯色；0%允许空或隐藏。IMAGE仅有 `imageHash` 不能证明非纯色，保持未验证并补实际图面评审，不宣称自动覆盖全部材质。纯色规则圆弧、完整圆环和直线须使用 `native_progress`，不得登记为状态切图。不能把 `battery` 等业务名写成几何类型；此分段计数检查仅用于声明了 `segment_count` 的序列。真实PNG再比较轮廓及亮起段，不能仅凭 `include_track` 自报。旧报告保留；重新验证的缺失证据记未验证，不能沿用旧通过结论。
