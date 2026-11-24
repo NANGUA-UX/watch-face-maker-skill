@@ -10,6 +10,7 @@ from pathlib import Path
 
 from workflow_guards import file_sha256, load_contract
 from merge_snapshot_pages import validate_snapshot_roles
+from background_edges import requires_background_review, validate_edge_review
 
 
 def _read(path):
@@ -157,8 +158,7 @@ def seal_prototype(args, contract, manifest, snapshot, review):
             ('manifest', args.manifest), ('snapshot', args.snapshot), ('visual_review', args.visual_review)))
         implementation = _path(args.exports_dir, review['implementation_export']['path'])
         if same and file_sha256(implementation) == review['implementation_sha256']:
-            if snapshot.get('config',{}).get('background_id'):
-                from background_edges import validate_edge_review
+            if requires_background_review(snapshot):
                 source=manifest.get('source_strategy',{})
                 hashes=[value for key in ('reference_image_hashes','adopted_image_hashes','reused_image_hashes')
                         for value in source.get(key,[])]

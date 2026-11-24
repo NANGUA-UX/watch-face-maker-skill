@@ -17,6 +17,7 @@ from run_evidence import safe_path, stable_snapshot, validate_run
 from pointer_checks import validate_pointers, validate_aod_pointers
 from screen_geometry import screen_spec, contains, fit_preview
 from layout_precision import precision_exemptions
+from background_edges import local_background_animations, local_background_layout, requires_background_review
 from stroke_geometry import stroke_colors
 from workflow_guards import file_sha256, verified_gate_failures, load_contract
 from visual_artifacts import comparison_images
@@ -730,8 +731,18 @@ def validate_target_geometry(snapshot, spec):
         failures.append(config['asset_board_id'])
     result = [check_item('snapshot.target_geometry', 'fail' if failures else ('unverified' if unknown else 'pass'), '核对目标画布、Active圆角、缩略图和切图分区', failures+unknown)]
     bg = nodes.get(config.get('background_id'))
-    bg_ok = bg and [bg.get('width'), bg.get('height')] == [spec['width'], spec['height']]
-    result.append(check_item('snapshot.background_fit', ('pass' if bg_ok else 'fail') if bg else 'unverified', '背景母件须匹配目标尺寸；铺满与构图仍须视觉复核', [config.get('background_id')] if bg else []))
+    if local_background_animations(snapshot):
+        try:
+            _, static, animation = local_background_layout(snapshot, spec, nodes)
+            result.append(check_item('snapshot.background_fit', 'pass', '局部背景的 Bg 与 Ani 摆位及尺寸可复核，实际覆盖由逐帧 PNG 检查',
+                                     [static['instance_id'], animation['instance_id']]))
+        except LookupError as exc:
+            result.append(check_item('snapshot.background_fit', 'unverified', str(exc)))
+        except (ValueError, TypeError) as exc:
+            result.append(check_item('snapshot.background_fit', 'fail', str(exc)))
+    else:
+        bg_ok = bg and [bg.get('width'), bg.get('height')] == [spec['width'], spec['height']]
+        result.append(check_item('snapshot.background_fit', ('pass' if bg_ok else 'fail') if bg else 'unverified', '背景母件须匹配目标尺寸；铺满与构图仍须视觉复核', [config.get('background_id')] if bg else []))
     # 排除组件库内部几何；只核对Active/AOD中直接组装的切图实例及布局祖先。
     failures, unknown = [], []
     for root in (config['active_id'], config['aod_id']):
@@ -866,10 +877,15 @@ def validate_background_animation(snapshot, entries, board_components, nodes_by_
         if not frame_size or any(v > limit for v, limit in zip(frame_size, screen)):
             failures.append("局部动态的公共裁框不得超出目标屏幕尺寸")
         if (len(bg_nodes) != 1 or bg_nodes[0]["id"] != bg_id
-                or (bg_nodes[0].get("width"), bg_nodes[0].get("height")) != screen
                 or not effectively_visible(bg_nodes[0], nodes_by_id, config["asset_board_id"])
                 or not has_1x_png(bg_nodes[0])):
-            failures.append("局部动态须有唯一一张全屏、正式导出的静态 Bg")
+            failures.append("局部动态须有唯一一张正式导出的静态 Bg")
+        else:
+            bg_size = bg_nodes[0].get("width"), bg_nodes[0].get("height")
+            if any(not is_integer(v) or not 0 < v <= limit for v, limit in zip(bg_size, screen)):
+                failures.append("静态 Bg 须为目标范围内的正整数画布")
+            if "device_bg_canvas" in sequence and (sequence["device_bg_canvas"] != "screen" or bg_size != screen):
+                failures.append("登记设备全屏画布要求时，Bg 尺寸须匹配目标屏幕")
     return failures, []
 
 
@@ -1701,6 +1717,7 @@ def validate_pngs(snapshot: dict, exports_dir: Path) -> list[dict]:
             failures.append(f"PNG 无法读取：{path} ({exc})")
     if 'canvas' in snapshot.get('config', {}):
         config = snapshot['config']
+        local_background = bool(local_background_animations(snapshot))
         for item in export_items:
             image = images.get(item.get('node_id'))
             if image is None:
@@ -1710,7 +1727,7 @@ def validate_pngs(snapshot: dict, exports_dir: Path) -> list[dict]:
             expected_scale = 5 if item.get('role') == 'presentation_main' else 1
             if setting.get('constraint') != {'type':'SCALE','value':expected_scale}:
                 failures.append(f"目标导出倍率错误：{item['path']}")
-            if item.get('role') == 'aod_full' or item['node_id'] == config.get('background_id'):
+            if item.get('role') == 'aod_full' or (not local_background and item['node_id'] == config.get('background_id')):
                 if image.size != (spec['width'],spec['height']):
                     failures.append(f"全屏资源与目标尺寸不符：{item['path']}")
             if item['node_id'] == config.get('preview_id'):
@@ -1752,7 +1769,7 @@ def validate_pngs(snapshot: dict, exports_dir: Path) -> list[dict]:
                             bright += 1
             ratio = bright / total if total else 0
             checks.append(check_item("exports.aod_brightness", "fail" if ratio > .10 else "pass", f"AOD 实际屏幕可见区域内合成黑底后 RGB>0 的亮像素比例 {ratio:.4%}，阈值 10%", [node["id"]]))
-    if snapshot.get('config', {}).get('background_id'):
+    if requires_background_review(snapshot):
         from background_edges import analyze_background, coverage_status
         background, _ = analyze_background(snapshot, exports_dir)
         checks.append(check_item('exports.background_coverage', coverage_status(background),
@@ -2070,7 +2087,7 @@ def validate_workflow_binding(
             if missing_invariants:
                 visual_errors.append("视觉预检遗漏合同不变量：" + "、".join(missing_invariants))
 
-    if isinstance(snapshot, dict) and snapshot.get('config', {}).get('background_id'):
+    if isinstance(snapshot, dict) and requires_background_review(snapshot):
         if review is None or exports_dir is None or visual_review_path is None:
             visual_errors.append('缺少背景边缘复核输入')
         else:

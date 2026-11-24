@@ -11,6 +11,7 @@ from pathlib import Path
 
 from workflow_guards import file_sha256, load_contract
 from visual_artifacts import comparison_images
+from background_edges import analyze_background, requires_background_review
 
 
 def parse_crop(value: str, width: int, height: int) -> tuple[str, tuple[int, int, int, int]]:
@@ -140,8 +141,7 @@ def main() -> int:
             for invariant in contract["reference_contract"]["invariants"]
         ],
     }
-    if snapshot.get('config', {}).get('background_id'):
-        from background_edges import analyze_background
+    if requires_background_review(snapshot):
         edge, edge_images = analyze_background(snapshot, args.exports_dir)
         edge['artifacts'] = {}
         for key, edge_image in edge_images.items():

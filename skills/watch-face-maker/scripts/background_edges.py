@@ -171,6 +171,214 @@ def _edge_images(image, spec, missing):
     return images
 
 
+def local_background_animations(snapshot):
+    entries = snapshot.get('animations', [])
+    return [entry for entry in entries if isinstance(entry, dict) and entry.get('background_mode') == 'local'] if isinstance(entries, list) else []
+
+
+def requires_background_review(snapshot):
+    return bool(snapshot.get('config', {}).get('background_id') or local_background_animations(snapshot))
+
+
+def local_background_layout(snapshot, spec, nodes):
+    """从 Active 中的真实实例读取平移和层序，不使用资源板坐标。"""
+    sequences = local_background_animations(snapshot)
+    if len(sequences) != 1:
+        raise ValueError('局部动态须唯一登记一组 Ani')
+    sequence = sequences[0]
+    ids = sequence.get('node_ids')
+    if (not isinstance(ids, list) or len(ids) != 60 or any(not isinstance(i, str) for i in ids)
+            or len(set(ids)) != 60):
+        raise ValueError('局部动态须提供 60 个不同帧 ID')
+    config = snapshot['config']
+    active = nodes.get(config.get('active_id'))
+    bg = nodes.get(config.get('background_id'))
+    if not active or not bg or not isinstance(config.get('canvas'), dict):
+        raise LookupError('缺少目标屏幕、Active 或 Bg 的回读')
+    screen = (spec['width'], spec['height'])
+    if (active.get('width'), active.get('height')) != screen:
+        raise ValueError('局部背景所用 Active 与目标尺寸不符')
+    if active.get('clips_content') is None or active.get('cornerRadius') is None:
+        raise LookupError('缺少 Active 屏形裁切属性')
+    if active['clips_content'] is not True or active['cornerRadius'] != spec['corner_radius']:
+        raise ValueError('局部背景须由 Active 统一裁为目标屏形')
+    if 'device_bg_canvas' in sequence and sequence['device_bg_canvas'] != 'screen':
+        raise ValueError('明确要求整屏静态画布时须登记 device_bg_canvas=screen')
+
+    if active.get('absolute_transform') is None:
+        raise LookupError('缺少 Active 原始变换')
+    to_screen = _inverse(_matrix(active['absolute_transform']))
+    sources = {bg['id'], *ids}
+    mask_parents = {node.get('parent_id') for node in nodes.values()
+                    if node.get('isMask') and node.get('visible', True)}
+    bg_layers, ani_layers = [], []
+    for layer in nodes.values():
+        source = layer.get('main_component_id')
+        if layer.get('type') != 'INSTANCE' or source not in sources:
+            continue
+        chain = []
+        current = layer
+        seen = set()
+        while current and current['id'] != active['id'] and current['id'] not in seen:
+            seen.add(current['id'])
+            chain.append(current)
+            current = nodes.get(current.get('parent_id'))
+        if (not current or current['id'] != active['id']
+                or any(part.get('visible') is False or part.get('opacity') == 0 for part in chain)):
+            continue
+        if any(part.get('opacity', 1) != 1 or part.get('blendMode') not in (None, 'NORMAL', 'PASS_THROUGH')
+               or part.get('isMask') or part.get('parent_id') in mask_parents for part in chain):
+            raise LookupError('层间遮罩、透明度或混合效果须先在源母件内合成')
+        for parent in chain[1:]:
+            if parent.get('type') not in ('GROUP', 'FRAME') or any(parent.get(k) for k in ('clips_content', 'effects', 'fills', 'strokes')):
+                raise LookupError('局部背景的布局祖先须无裁切、效果、填充或描边')
+        if layer.get('overrides') != []:
+            raise LookupError('Bg 与代表帧须回读为未覆写实例')
+        master = nodes.get(source)
+        if not master or layer.get('absolute_transform') is None:
+            raise LookupError('缺少背景实例母件或实际摆位')
+        size = master.get('width'), master.get('height')
+        transform = _multiply(to_screen, _matrix(layer['absolute_transform']))
+        x, y = transform[0][2], transform[1][2]
+        linear = [row[:2] for row in transform]
+        if (any(not isinstance(v, int) or isinstance(v, bool) or v <= 0 for v in size)
+                or (layer.get('width'), layer.get('height')) != size or linear != [[1, 0], [0, 1]]
+                or abs(x-round(x)) > .001 or abs(y-round(y)) > .001):
+            raise ValueError('Bg 与代表帧须按原始尺寸和屏幕相对整数坐标摆放')
+        x, y = round(x), round(y)
+        if x < 0 or y < 0 or x+size[0] > screen[0] or y+size[1] > screen[1]:
+            raise ValueError('局部背景的 Bg 或 Ani 裁框超出目标尺寸')
+        target = bg_layers if source == bg['id'] else ani_layers
+        target.append({'instance_id':layer['id'], 'node_id':source, 'offset':[x,y], 'size':list(size)})
+    if len(bg_layers) > 1 or len(ani_layers) > 1:
+        raise ValueError('Active 中须各有一个可见的 Bg 与 Ani 代表帧实例')
+    if not bg_layers or not ani_layers:
+        raise LookupError('缺少 Active 中实际摆放的 Bg 或 Ani 代表帧')
+    bg_layer, ani_layer = bg_layers[0], ani_layers[0]
+    order = list(nodes)
+    if order.index(bg_layer['instance_id']) > order.index(ani_layer['instance_id']):
+        raise ValueError('Active 中 Bg 须放在 Ani 下方')
+    if sequence.get('device_bg_canvas') == 'screen' and (tuple(bg_layer['size']) != screen or bg_layer['offset'] != [0,0]):
+        raise ValueError('目标设备要求整屏 Bg 画布且位于原点')
+    return sequence, bg_layer, ani_layer
+
+
+def _background_png(snapshot, exports, node):
+    items = [item for item in snapshot.get('export_items', []) if item.get('node_id') == node['id']]
+    if len(items) != 1:
+        raise LookupError(f'{node["id"]} 须唯一登记背景 1× PNG 导出')
+    item = items[0]
+    settings = node.get('export_settings', [])
+    setting = item.get('setting', settings[0] if len(settings) == 1 else None)
+    if (not isinstance(setting, dict) or setting.get('format') != 'PNG'
+            or setting.get('constraint') != {'type':'SCALE','value':1} or setting not in settings):
+        raise ValueError('背景边缘验证必须读取当前 1× PNG 导出')
+    image, export, _ = _read(exports, item.get('path'))
+    if image.format != 'PNG':
+        raise ValueError('背景实际文件不是 PNG')
+    return image.convert('RGBA'), export, setting
+
+
+def _record_source(record, source):
+    record['source'] = source
+    record['files'].extend(source[key] for key in ('source', 'valid_region') if key in source)
+
+
+def _check_protected_region(value, exports, image, record, check):
+    from PIL import ImageChops
+
+    if not isinstance(value, dict) or not (value.get('original_background_path') or value.get('protected_region_path')):
+        return
+    try:
+        before, before_record, _ = _read(exports, value.get('original_background_path'))
+        protected, protected_record, _ = _read(exports, value.get('protected_region_path'))
+        if before.size != image.size or protected.size != image.size or protected.convert('L').getbbox() is None:
+            raise ValueError('补边前背景/主体保护区域须为目标尺寸且保护区域非空')
+        record['files'].extend([before_record, protected_record])
+        diff = ImageChops.difference(image, before.convert('RGBA'))
+        changed = ImageChops.lighter(ImageChops.lighter(diff.getchannel('R'), diff.getchannel('G')),
+                                     ImageChops.lighter(diff.getchannel('B'), diff.getchannel('A')))
+        changed = ImageChops.multiply(changed.point(lambda a:255 if a > 1 else 0), protected.convert('L'))
+        check('protected_region', 'fail' if changed.getbbox() else 'pass', '保护区RGBA逐像素差不超过1/255；不得通过整体缩放遮边')
+    except LookupError as exc:
+        check('protected_region', 'unverified', str(exc))
+    except (OSError, ValueError, TypeError) as exc:
+        check('protected_region', 'fail', str(exc))
+
+
+def _analyze_local_background(snapshot, exports, nodes, spec, record, check):
+    from PIL import Image, ImageChops
+
+    sequence, bg, ani = local_background_layout(snapshot, spec, nodes)
+    size = (spec['width'], spec['height'])
+    source, export, setting = _background_png(snapshot, exports, nodes[bg['node_id']])
+    if list(source.size) != bg['size']:
+        raise ValueError('Bg 实际 PNG 尺寸与 Active 实例不一致')
+    record['background'] = {**bg, **export, 'setting':setting}
+    record['files'].append(export)
+    record['animation'] = {**ani, 'frames':[]}
+    check('container', 'pass', '从当前 Active 查得目标屏形、1× 实例、叠放顺序和整数坐标')
+    base = Image.new('RGBA', size)
+    base.paste(source, tuple(bg['offset']))
+    offset = tuple(ani['offset'])
+    paste_box = (*offset, offset[0]+ani['size'][0], offset[1]+ani['size'][1])
+    opaque = Image.new('L', tuple(ani['size']), 255)
+    missing = Image.new('L', size)
+    screen = _screen(*size, spec['shape'], spec['corner_radius'])
+    inner = _screen(*size, spec['shape'], spec['corner_radius'], 1)
+    core = _screen(*size, spec['shape'], spec['corner_radius'], 2)
+    holes = []
+    for identity in sequence['node_ids']:
+        node = nodes.get(identity)
+        if not node:
+            raise LookupError(f'缺少帧母件回读：{identity}')
+        frame, export, setting = _background_png(snapshot, exports, node)
+        if list(frame.size) != ani['size'] or [node.get('width'), node.get('height')] != ani['size']:
+            raise ValueError(f'动画帧 {identity} 未使用共同裁框与 1× PNG 尺寸')
+        record['animation']['frames'].append({'node_id':identity, **export, 'setting':setting})
+        record['files'].append(export)
+        composite = base.copy()
+        composite.alpha_composite(frame, offset)
+        alpha = composite.getchannel('A')
+        gap = ImageChops.lighter(ImageChops.multiply(core, alpha.point(lambda a:255 if a < 250 else 0)),
+                                 ImageChops.multiply(inner, alpha.point(lambda a:255 if a < 128 else 0)))
+        if gap.getbbox():
+            holes.append(identity)
+            missing = ImageChops.lighter(missing, gap)
+        opaque = ImageChops.darker(opaque, frame.getchannel('A'))
+        if identity == ani['node_id']:
+            representative = composite
+
+    covered = Image.new('L', size)
+    covered.paste(opaque.point(lambda a:255 if a == 255 else 0), paste_box)
+    hidden = ImageChops.multiply(screen, ImageChops.multiply(covered, base.getchannel('A').point(lambda a:255 if a else 0)))
+    check('output_alpha', 'fail' if holes else 'pass', 'Bg 与 Ani 合成存在透明缺口：' + '、'.join(holes) if holes else '全部 60 张合成帧覆盖目标屏形，外沿抗锯齿另作视觉复核')
+    check('hidden_static_pixels', 'fail' if hidden.getbbox() else 'pass', '核对 Bg 中是否有被全部帧完全遮住的可去除像素；半透明和仅部分帧遮挡的区域保留所需底图')
+    value = snapshot.get('background_source')
+    if value is not None and not isinstance(value, dict):
+        raise ValueError('背景来源记录结构无效')
+    if value and any(k in value for k in ('kind', 'source_node_id', 'source_path', 'valid_region_path', 'source_to_background', 'coverage_basis')):
+        try:
+            source_info, region = _source_region(snapshot, exports, nodes, nodes[bg['node_id']], source.size)
+            _record_source(record, source_info)
+            positioned = Image.new('L', size)
+            positioned.paste(region, tuple(bg['offset']))
+            needed = ImageChops.subtract(inner, covered)
+            gap = ImageChops.multiply(needed, positioned.point(lambda a:255 if a < 128 else 0))
+            if gap.getbbox():
+                missing = ImageChops.lighter(missing, gap)
+            check('valid_region', 'fail' if gap.getbbox() else 'pass', '已登记的 Bg 有效画面须覆盖仍需要静态素材的屏内区域')
+        except LookupError as exc:
+            check('valid_region', 'unverified', str(exc))
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            check('valid_region', 'fail', str(exc))
+    record['missing_bounds'] = list(missing.getbbox()) if missing.getbbox() else None
+    record['hidden_static_bounds'] = list(hidden.getbbox()) if hidden.getbbox() else None
+    representative.putalpha(ImageChops.multiply(screen, representative.getchannel('A')))
+    _check_protected_region(value, exports, representative, record, check)
+    return _edge_images(representative, spec, ImageChops.lighter(missing, hidden))
+
+
 def analyze_background(snapshot, exports):
     """返回可序列化事实与派生图片；所有人工边缘结论初始未验证。"""
     from PIL import Image, ImageChops
@@ -184,20 +392,11 @@ def analyze_background(snapshot, exports):
         record['target']={k:spec[k] for k in ('width','height','shape','corner_radius')}
         size=(spec['width'],spec['height'])
         nodes={n['id']:n for n in snapshot.get('nodes',[])}
+        if local_background_animations(snapshot):
+            return record, _analyze_local_background(snapshot, exports, nodes, spec, record, check)
         bg=nodes.get(snapshot.get('config',{}).get('background_id'))
         if bg is None:raise LookupError('缺少背景母件回读')
-        items=[i for i in snapshot.get('export_items',[]) if i.get('node_id')==bg['id']]
-        if len(items)!=1:raise LookupError('须唯一登记背景1×PNG导出')
-        item=items[0]
-        setting=item.get('setting')
-        if setting is None and len(bg.get('export_settings',[]))==1:setting=bg['export_settings'][0]
-        if (not isinstance(setting,dict) or setting.get('format')!='PNG'
-                or setting.get('constraint')!={'type':'SCALE','value':1}
-                or setting not in bg.get('export_settings',[])):
-            raise ValueError('背景边缘验证必须读取当前1×PNG导出')
-        image,export,_=_read(exports,item.get('path'))
-        if image.format!='PNG':raise ValueError('背景实际文件不是PNG')
-        image=image.convert('RGBA')
+        image,export,setting=_background_png(snapshot,exports,bg)
         record['background']={'node_id':bg['id'],**export,'setting':setting}
         record['files'].append(export)
         if image.size!=size:raise ValueError('实际背景PNG与目标屏幕尺寸不同')
@@ -220,30 +419,14 @@ def analyze_background(snapshot, exports):
         missing=alpha_holes
         try:
             source,region=_source_region(snapshot,exports,nodes,bg,size)
-            record['source']=source
-            if 'source' in source:record['files'].append(source['source'])
-            if 'valid_region' in source:record['files'].append(source['valid_region'])
+            _record_source(record, source)
             missing=ImageChops.lighter(missing,ImageChops.multiply(visible,region.point(lambda a:255 if a<128 else 0)))
             check('valid_region','fail' if missing.getbbox() else 'pass','有效画面经实际填充/节点变换后须覆盖屏幕；外沿1px只容许抗锯齿')
         except LookupError as exc:
             check('valid_region','unverified',str(exc))
         except (OSError,ValueError,TypeError,KeyError) as exc:
             check('valid_region','fail',str(exc))
-        value=snapshot.get('background_source',{})
-        if isinstance(value,dict) and (value.get('original_background_path') or value.get('protected_region_path')):
-            try:
-                before,before_record,_=_read(exports,value.get('original_background_path'))
-                protected,protected_record,_=_read(exports,value.get('protected_region_path'))
-                if before.size!=size or protected.size!=size or protected.convert('L').getbbox() is None:
-                    raise ValueError('补边前背景/主体保护区域须为目标尺寸且保护区域非空')
-                record['files'].extend([before_record,protected_record])
-                diff=ImageChops.difference(image,before.convert('RGBA'))
-                changed=ImageChops.lighter(ImageChops.lighter(diff.getchannel('R'),diff.getchannel('G')),
-                                           ImageChops.lighter(diff.getchannel('B'),diff.getchannel('A')))
-                changed=ImageChops.multiply(changed.point(lambda a:255 if a>1 else 0),protected.convert('L'))
-                check('protected_region','fail' if changed.getbbox() else 'pass','保护区RGBA逐像素差不超过1/255；不得通过整体缩放遮边')
-            except LookupError as exc:check('protected_region','unverified',str(exc))
-            except (OSError,ValueError,TypeError) as exc:check('protected_region','fail',str(exc))
+        _check_protected_region(snapshot.get('background_source'), exports, image, record, check)
         record['missing_bounds']=list(missing.getbbox()) if missing.getbbox() else None
         images=_edge_images(image,spec,missing)
     except LookupError as exc:check('inputs','unverified',str(exc))
