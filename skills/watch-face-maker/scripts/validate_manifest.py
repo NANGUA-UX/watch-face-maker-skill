@@ -126,6 +126,8 @@ def validate_manifest(data: dict) -> tuple[list[str], dict]:
     for field in ("color_variants", "special_date"):
         if field in features and not isinstance(features[field], bool):
             errors.append(f"features.{field} 必须是布尔值")
+    if "background_animation" in features and features["background_animation"] not in ("full", "local"):
+        errors.append("features.background_animation 必须是 full 或 local")
     color_variants = features.get("color_variants", False) is True
     special_date_enabled = features.get("special_date", False) is True
     if not color_variants and len(themes) > 1:
@@ -800,7 +802,78 @@ def validate_target_geometry(snapshot, spec):
     return result
 
 
-def validate_snapshot(snapshot: dict, capability_modes: dict | None = None) -> list[dict]:
+def validate_background_animation(snapshot, entries, board_components, nodes_by_id, spec, manifest):
+    features = manifest.get("features")
+    mode = features.get("background_animation") if isinstance(features, dict) else None
+    if not entries:
+        return [], ["缺少所选动态背景的母件记录"] if mode else []
+    if mode not in ("full", "local") or len(entries) != 1 or entries[0]["background_mode"] != mode:
+        return ["动态背景须与清单一致，且只登记一组全屏或局部背景序列"], []
+    prefix = manifest.get("prefix")
+    if not isinstance(prefix, str) or not prefix:
+        return [], ["缺少清单切图前缀，无法核对 Ani 与 Bg 命名"]
+
+    config = snapshot["config"]
+    board_ids = descendants(nodes_by_id, config["asset_board_id"])
+    components = {n["id"]: n for n in board_components if n["id"] in board_ids}
+    source_only = set(snapshot.get("source_only_node_ids", []))
+    assets_by_id = {}
+    for item in snapshot.get("export_items", []):
+        if isinstance(item, dict) and item.get("role") == "asset":
+            assets_by_id.setdefault(item.get("node_id"), []).append(item)
+
+    def has_1x_png(node):
+        settings = [setting for setting in node.get("export_settings", []) if setting.get("format") == "PNG"]
+        items = assets_by_id.get(node["id"], [])
+        return (len(settings) == 1 and settings[0].get("constraint") == {"type": "SCALE", "value": 1}
+                and len(items) == 1 and items[0].get("path") == node["name"] + ".png"
+                and items[0].get("setting", settings[0]) == settings[0])
+
+    sequence = entries[0]
+    ids = sequence.get("node_ids", [])
+    if (not isinstance(ids, list) or len(ids) != 60 or any(not isinstance(n, str) for n in ids)
+            or len(set(ids)) != 60 or not is_integer(sequence.get("expected_count")) or sequence["expected_count"] != 60
+            or not is_integer(sequence.get("start_index")) or sequence["start_index"] != 0):
+        return ["动态背景须登记从 000 开始的 60 个不同帧母件"], []
+
+    ani_prefix = f"{prefix}/Ani/"
+    frame_ids = {identity for identity, node in components.items()
+                 if identity not in source_only and node.get("name", "").startswith(ani_prefix)}
+    failures = []
+    if set(ids) != frame_ids:
+        failures.append("目标切图分区的 Ani 帧有遗漏、多余或不属于正式资源")
+    frame_size = None
+    for index, identity in enumerate(ids):
+        node = components.get(identity, {})
+        if (node.get("name") != f"{ani_prefix}{index:03d}" or not effectively_visible(node, nodes_by_id, config["asset_board_id"])
+                or not has_1x_png(node)):
+            failures.append(f"{identity}：Ani 母件名称、可见性或 1× PNG 映射有误")
+            continue
+        size = (node.get("width"), node.get("height"))
+        if any(not is_integer(v) or v < 1 for v in size) or (frame_size is not None and frame_size != size):
+            failures.append(f"{identity}：动画帧须使用一致的正整数裁框尺寸")
+        else:
+            frame_size = size
+
+    screen = spec["width"], spec["height"]
+    bg_id = config.get("background_id")
+    bg_nodes = [node for identity, node in components.items()
+                if identity not in source_only and node.get("name") == f"{prefix}/Bg"]
+    if mode == "full":
+        if frame_size != screen or bg_id not in ids or bg_nodes:
+            failures.append("全屏动态的帧须为目标屏幕尺寸，使用代表帧作为背景并省略独立 Bg")
+    else:
+        if not frame_size or any(v > limit for v, limit in zip(frame_size, screen)):
+            failures.append("局部动态的公共裁框不得超出目标屏幕尺寸")
+        if (len(bg_nodes) != 1 or bg_nodes[0]["id"] != bg_id
+                or (bg_nodes[0].get("width"), bg_nodes[0].get("height")) != screen
+                or not effectively_visible(bg_nodes[0], nodes_by_id, config["asset_board_id"])
+                or not has_1x_png(bg_nodes[0])):
+            failures.append("局部动态须有唯一一张全屏、正式导出的静态 Bg")
+    return failures, []
+
+
+def validate_snapshot(snapshot: dict, capability_modes: dict | None = None, *, manifest: dict | None = None) -> list[dict]:
     checks: list[dict] = []
     config = snapshot.get("config") if isinstance(snapshot.get("config"), dict) else {}
     if config.get("stage") == "prototype":
@@ -1519,9 +1592,19 @@ def validate_snapshot(snapshot: dict, capability_modes: dict | None = None) -> l
     style_status = "fail" if style_failures else ("unverified" if style_unknown else "pass")
     checks.append(check_item("snapshot.aod_style", style_status, "AOD 数字时间描边须至少 2 px、无填充且颜色符合要求" if style_failures else ("缺少 AOD 原始样式证据" if style_unknown else f"AOD 母件与实际显示文字均无填充，描边为 {color} 且至少 2 px"), style_failures + style_unknown))
 
-    animation_failures = []
     animations = snapshot.get("animations", [])
+    animation_failures = []
+    if not isinstance(animations, list):
+        animation_failures.append("animations 必须是数组")
+        animations = []
+    background_entries = []
     for animation in animations:
+        if not isinstance(animation, dict):
+            animation_failures.append("动画记录必须是对象")
+            continue
+        if "background_mode" in animation:
+            background_entries.append(animation)
+            continue
         ids = animation.get("node_ids", [])
         members = [nodes_by_id[node_id] for node_id in ids if node_id in nodes_by_id]
         indices = []
@@ -1534,8 +1617,13 @@ def validate_snapshot(snapshot: dict, capability_modes: dict | None = None) -> l
         sizes = {(node.get("width"), node.get("height")) for node in members}
         if len(members) != expected or indices != expected_indices or len(sizes) != 1 or any(not png_export(node) for node in members):
             animation_failures.extend(ids or ["未提供帧"])
-    animation_status = "not_applicable" if not animations else ("fail" if animation_failures else "pass")
-    checks.append(check_item("snapshot.animations", animation_status, "未声明动画资源" if animation_status == "not_applicable" else ("动画帧缺失、错序、尺寸不一或缺导出设置" if animation_failures else "动画原始帧数量、序列、尺寸和导出设置通过"), animation_failures))
+    background_failures, animation_unknown = validate_background_animation(
+        snapshot, background_entries, board_components, nodes_by_id, spec, manifest or {})
+    animation_failures.extend(background_failures)
+    animation_status = ("fail" if animation_failures else "unverified" if animation_unknown
+                        else "pass" if animations else "not_applicable")
+    explanation = "未声明动画资源" if animation_status == "not_applicable" else "核对动画帧的序列、尺寸、导出及全屏或局部背景拆分"
+    checks.append(check_item("snapshot.animations", animation_status, explanation, animation_failures + animation_unknown))
     if snapshot.get("pointers") or snapshot.get("face_type") == "analog":
         pointers = snapshot.get("pointers", [])
         errors, measured = validate_pointers(snapshot, pointers, canvas=(spec["width"], spec["height"]), safe_margin=spec["safe_margin"], shape=spec["shape"], corner_radius=spec["corner_radius"])
@@ -1581,6 +1669,9 @@ def validate_pngs(snapshot: dict, exports_dir: Path) -> list[dict]:
             continue
         try:
             with Image.open(path) as source:
+                if source.format != "PNG":
+                    failures.append(f"文件不是实际 PNG：{path}")
+                    continue
                 image = source.convert("RGBA")
             images[node.get("id")] = image
             settings = [value for value in node.get("export_settings", []) if value.get("format") == "PNG"]
@@ -2061,7 +2152,7 @@ def main() -> int:
             snapshot = json.loads(args.snapshot.read_text(encoding="utf-8"))
             if not isinstance(snapshot, dict):
                 raise ValueError("根节点必须是 JSON 对象")
-            checks.extend(validate_snapshot(snapshot, data.get("capability_modes")))
+            checks.extend(validate_snapshot(snapshot, data.get("capability_modes"), manifest=data))
             checks.extend(validate_target_binding(data, snapshot))
             checks.extend(validate_capability_binding(data, snapshot))
             checks.append(check_item("snapshot.stability", "pass" if stable_snapshot(snapshot) else "unverified", "核对采集前后内容与引用签名；旧快照不证明稳定"))

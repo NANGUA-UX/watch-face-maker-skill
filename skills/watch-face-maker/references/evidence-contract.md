@@ -31,7 +31,7 @@
 - `stroke_geometry: [{"root_id":"...", "path_id":"...", "role":"progress|track|decoration", "shape":"arc|linear|circle", "cap":"NONE|ROUND|SQUARE"}]`：登记规则进度、底轨和装饰线的专用逻辑根与实际路径。采集配置 `stroke_geometry_node_ids` 为全部 `path_id`；validation 模式仅为这些节点保留原始 `vectorNetwork/vectorPaths`，样式及端点继续参与同轮签名与资源指纹。检查无可见填充、有效正宽描边、真实开放拓扑及端点覆盖，完整椭圆闭环无需端点；逻辑根内额外几何（包括隐藏端帽）失败。缺清单/原始拓扑为未验证，不修改旧报告；确无适用对象可显式空数组，但须人工核对清单完整性。详见[描边与端点](stroke-geometry.md)。
 - `native_progress: [{"capability":"battery", "node_id":"...", "shape":"arc|linear", "framework_capability_source":"..."}]`：仅用于清单 `capability_modes` 已选择 `native_continuous` 的纯色规则进度。`node_id` 指向资源分区内不导出PNG的可编辑示意母件，并列入 `source_only_node_ids`；母件、其引用实例及全部子层均关闭导出设置，也不得直接出现在正式 `export_items` 中。关联其子树内 `stroke_geometry.role=progress` 路径：规则圆弧优先原生ELLIPSE，保留真实arcData、正圆尺寸、innerRadius=1、无填充描边和实际端点；完整圆环核对整圈参数。开放VECTOR/LINE保留真实网络/原生直线证据；不能仅因存在arcData就通过，也不能要求合法椭圆弧提供vectorNetwork。此证据不证明固件接入或真机运行。
 - `resource_board_layout: true`：要求检查 `asset_board_id` 分区下全部直属可见节点的相交与越界，包含跨资源族母件、标题、大预览和用户保留对照节点。未声明时为未验证，不能用各状态族内部排列通过代替。
-- `animations: [{"node_ids": ["..."], "expected_count": 10, "start_index": 0}]`
+- `animations: [{"node_ids": ["..."], "expected_count": 10, "start_index": 0}]`：已有图标或特效序列沿用项目帧数。新做的正式动态背景在项目事实及清单的 `features.background_animation` 中登记 `full` 或 `local`，在快照 `animations` 中对应一条 `background_mode` 同值的记录，按播放顺序列出 `Ani/000` 至 `Ani/059` 的完整母件 ID，`expected_count: 60`、`start_index: 0`。每帧独立进入 `export_items` 的 `asset` 映射并导出 1× PNG。全屏 `config.background_id` 指向用于展示和边缘复核的同序列代表帧，无独立 `Bg`；局部指向同分区唯一全尺寸 `<Prefix>/Bg` 母件，该母件也导出 1× PNG。实际公共裁框坐标、叠放方式、静态元素归属与播放检查见[动画切图](animation-assets.md)。
 
 `source_only_node_ids` 记录已合入背景或作为旧版对照保留、不再交付的母件，项目中逐项注明原因。它们必须仍在资产板上并关闭PNG导出；从正式导出映射及对应文字资源族中移除，并清理导出目录里的旧独立 PNG。不能因为展示稿未引用某个合法状态就将其排除。描边后的字形渲染边界也必须完整，不能继续沿用实心字的旧测量。
 

@@ -156,7 +156,7 @@ def validate_batch(targets, root):
         identity = target_id(t); snapshot = t['snapshot']; directory = Path(root)/identity
         errors, _ = validate_manifest(t['manifest'])
         checks = [check_item('manifest','fail' if errors else 'pass','；'.join(errors) if errors else '目标清单检查通过')]
-        checks += validate_snapshot(snapshot) + validate_target_binding(t['manifest'], snapshot)
+        checks += validate_snapshot(snapshot, manifest=t['manifest']) + validate_target_binding(t['manifest'], snapshot)
         pagination = snapshot.get('pagination', {})
         complete = pagination.get('complete') is True and pagination.get('total_nodes') == pagination.get('collected_nodes') == len(snapshot.get('nodes', []))
         checks += validate_pngs(snapshot,directory) if complete else [check_item('exports.png','unverified','快照不完整，不能验收正式资源映射')]

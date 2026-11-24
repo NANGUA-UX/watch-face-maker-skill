@@ -46,7 +46,7 @@ python3 "<SKILL_DIR>/scripts/watch_face.py" check <项目目录> --gate <intake|
 - 主时间（Hour、Minute 及 AOD 配对）按实际字符使用变宽切图；这个例外不扩展到秒数。秒数与普通数据、日期的同族 `0–9` 默认统一宽高，符号和单位仍按排版语义处理。不得把某个表盘的具体像素尺寸写成通用值。
 - AOD 默认制作。数字时间和 AOD 指针在目标原生尺寸下使用无填充灰色描边，默认及最小宽度均为 2 px；缩放后复查母件和实例。亮屏与 AOD 的每个时间字符逐对同宽同高，包括分隔符。
 - 表盘英文名可以有空格；切图前缀去掉空格后连写，不使用下划线。默认仅制作英文；变色、多语言、特殊日期、动画和开发文档列出的其他能力均按需启用。
-- 指针盘读[指针规则](references/analog-pointers.md)，多尺寸任务读[多尺寸适配](references/multi-size.md)：同屏形、同长宽比默认从认可源稿等比派生，仅作必要尺寸修正，保留TEXT、效果与排布；改变屏形/长宽比或用户要求重排才走重排路线。动画任务读[动画切图](references/animation-assets.md)。背景边界、AI素材和选定版本收尾读[混合制作与素材质量](references/background-composition.md)。
+- 指针盘读[指针规则](references/analog-pointers.md)，多尺寸任务读[多尺寸适配](references/multi-size.md)：同屏形、同长宽比默认从认可源稿等比派生，仅作必要尺寸修正，保留TEXT、效果与排布；改变屏形/长宽比或用户要求重排才走重排路线。制作动态背景、追光、闪烁、飘雪等粒子动效或导出 PNG 帧序列时，读[动画切图](references/animation-assets.md)。背景边界、AI素材和选定版本收尾读[混合制作与素材质量](references/background-composition.md)。
 
 ## 视觉预检与正式命令
 
