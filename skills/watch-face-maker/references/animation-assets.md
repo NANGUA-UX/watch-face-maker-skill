@@ -74,6 +74,26 @@ PY
 
 正式动态表盘每个目标规格同时交付 **App 展示 MP4** 和 **《表盘动画规则说明》**。用当前版本的 `Ani` 序列、静态 `Bg`（适用时）和亮屏布局合成 MP4。视频只呈现完整表盘按正常节奏播放的效果，保留目标屏形及时间、日期、数据示例。实际交付 `.mp4` 文件，在该规格的展示区放「预览 MP4」。当前工具无法嵌入视频时，在对应位置附可访问的 MP4 链接并保留文件交付。
 
+**首次绑定整表视频。** 制作正式动态表盘时，在每个规格完成亮屏、帧母件和视频展示位后，用 [绑定脚本](../scripts/watch_preview_binding.js) 将下列调用与脚本一起在当前 Figma 文件执行。静态规格跳过。新稿在展示区建立同尺寸固定亮屏 Frame，Active 实例作为直接子层置于原点。把独立前景也放进该外框。绑定和整表展示导出的 main_id 均指外框，active_id 指 Active 母件，preview_id 继续指缩略图。动画槽取当前 Active 实例内的代表帧。展示位取本规格同尺寸的专用矩形或空画框，使用视频节点本身的 ID。现有静态预览图可继续另存。
+
+```js
+await bindWatchPreview(figma, {
+  scopeId: config.section_id,
+  boardId: config.asset_board_id,
+  mainId: presentationFrame.id,
+  slotId: representativeInstance.id,
+  previewId: videoPreview.id,
+  frameIds: animation.node_ids,
+  mode: animation.background_mode,
+  fps: confirmedFps,
+  coverIds: standInRectangles.map(node => node.id)
+});
+```
+
+这里的 `animation` 取本规格已按播放顺序登记的背景序列。只有旧稿存在盖住动画的额外高清代表图时才登记它的矩形 ID，通常 `coverIds` 传空数组。该矩形伸出动画区的部分会保留，例如雪地下沿。登记后在桌面选中外框运行一次「整表 MP4」，随后固定点外框右侧「更新整表 MP4」。旧版绑定由桌面插件首次使用时原位升级，记录返回的外框 ID 作为当前 main_id。原规格改稿、重置或在框内替换同源同尺寸实例均复用此入口。复制出新规格或重建正式素材时重新绑定。安装与操作见[插件说明](../watch-preview/README.md)。
+
+已交付的稿子若自动识别失败，设计师可在「整表 MP4 → 重新绑定」中选回失效图层，保存绑定并继续导出。重建序列时选切图区的首帧母件，插件按名称恢复同一套 60 帧。
+
 在该规格的切图资源分区放可编辑的「表盘动画规则」文字标注，交付记录同步同一份说明。标注和 MP4 不进入切图 PNG 导出清单。正式说明按项目已确认的行为二选一，有特例时遵循项目确认：
 
 | 方案 | 写给开发 |

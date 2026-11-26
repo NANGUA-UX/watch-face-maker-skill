@@ -1,0 +1,29 @@
+{
+  "name": "整表 MP4",
+  "id": "1706997798655770150",
+  "api": "1.0.0",
+  "main": "code.js",
+  "capabilities": [],
+  "enableProposedApi": false,
+  "documentAccess": "dynamic-page",
+  "editorType": [
+    "figma"
+  ],
+  "ui": "ui.html",
+  "networkAccess": {
+    "allowedDomains": [
+      "none"
+    ]
+  },
+  "menu": [
+    {"command": "update", "name": "更新整表 MP4"},
+    {"command": "rebind", "name": "重新绑定"}
+  ],
+  "relaunchButtons": [
+    {
+      "command": "update",
+      "name": "更新整表 MP4"
+    },
+    {"command": "rebind", "name": "重新绑定"}
+  ]
+}

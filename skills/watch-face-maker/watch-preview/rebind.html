@@ -1,0 +1,37 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8">
+<style>
+*{box-sizing:border-box}body{font:13px/1.45 system-ui,sans-serif;margin:16px;color:var(--figma-color-text,#222);background:var(--figma-color-bg,#fff)}
+p{margin:0 0 10px}section{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:0 10px;align-items:center;padding:6px 0;border-bottom:1px solid var(--figma-color-border,#ddd)}
+small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--figma-color-text-secondary,#666)}
+button,input{font:inherit;color:inherit;background:var(--figma-color-bg,#fff);border:1px solid var(--figma-color-border-strong,#999);border-radius:5px;padding:4px 8px}
+button{cursor:pointer}input{width:62px}footer,.settings{display:flex;gap:8px;align-items:center;margin-top:10px}
+footer{justify-content:flex-end}.primary{background:var(--figma-color-bg-brand,#0c75d8);color:white;border-color:transparent}
+#message{margin:6px 0;color:var(--figma-color-text-danger,#a42a18)}#message:empty{display:none}
+</style>
+<p>在画布或左侧图层列表选择图层，再点对应行的「使用选中」。</p>
+<div id="rows"></div>
+<div class="settings"><label for="fps">帧率</label><input type="number" id="fps" value="30" min="1" step="1">fps</div>
+<p id="message" role="status"></p>
+<footer><button id="cancel">取消</button><button class="primary" id="save">保存绑定并导出 MP4</button></footer>
+<script>
+const post=message=>parent.postMessage({pluginMessage:message},'*');
+const names={main:'完整亮屏外框',slot:'亮屏内的动画图层',first:'切图区的首帧母件（Ani/000）',preview:'整表视频展示位',covers:'高清替身（可选）'};
+const fields={};
+for(const [role,name] of Object.entries(names)){
+  const row=document.createElement('section'),label=document.createElement('div'),value=document.createElement('small'),buttons=document.createElement('div');
+  label.append(name,value);fields[role]=value;
+  if(role==='covers'){const clear=document.createElement('button');clear.textContent='清空';clear.onclick=()=>post({kind:'clear-covers'});buttons.append(clear);}
+  const pick=document.createElement('button');pick.textContent='使用选中';pick.setAttribute('aria-label',name+'：使用选中');
+  pick.onclick=()=>post({kind:'pick',role});buttons.append(pick);row.append(label,buttons);document.getElementById('rows').append(row);
+}
+const fps=document.getElementById('fps'),save=document.getElementById('save');
+document.getElementById('cancel').onclick=()=>post({kind:'cancel'});
+save.onclick=()=>{save.disabled=true;post({kind:'save',fps:fps.value});};
+window.onmessage=e=>{
+  const m=e.data.pluginMessage;if(!m || !m.labels)return;
+  for(const [role,name] of Object.entries(m.labels)){fields[role].textContent=name;fields[role].title=name;}
+  if(m.resetFps)fps.value=m.fps;
+  document.getElementById('message').textContent=m.message || '';save.disabled=false;
+};
+post({kind:'ready'});
+</script></html>

@@ -1,0 +1,48 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8">
+<style>
+body{font:13px/1.5 system-ui,sans-serif;margin:18px;color:var(--figma-color-text,#222);background:var(--figma-color-bg,#fff)}progress{width:100%;height:6px}p{margin:0 0 10px}a{display:inline-block;margin-top:8px;color:var(--figma-color-text-brand,#1675d1)}
+</style>
+<p id="status" role="status">准备渲染整表…</p><progress id="progress" max="60" value="0"></progress><a id="download" hidden>保存 MP4</a>
+<style>[hidden]{display:none}</style>
+<!-- encoder -->
+<script>
+const statusText=document.getElementById('status'), progress=document.getElementById('progress'), download=document.getElementById('download');
+let encoder,ctx,filename,expected=0,total=0,savedURL;
+const send=msg=>parent.postMessage({pluginMessage:msg},'*');
+function status(s){statusText.textContent=s;}
+async function drawPNG(bytes){
+  const blob=new Blob([bytes],{type:'image/png'});
+  const bitmap=await createImageBitmap(blob);
+  try {
+    if(bitmap.width!==encoder.width || bitmap.height!==encoder.height)throw Error('整表渲染尺寸发生变化。');
+    ctx.fillStyle='#000';ctx.fillRect(0,0,encoder.width,encoder.height);ctx.drawImage(bitmap,0,0);
+    encoder.addFrameRgba(ctx.getImageData(0,0,encoder.width,encoder.height).data);
+  } finally {bitmap.close();}
+}
+window.onmessage=async event=>{
+  const m=event.data.pluginMessage;if(!m)return;
+  try {
+    if(m.kind==='start'){
+      encoder=await HME.createH264MP4Encoder();
+      encoder.width=m.width;encoder.height=m.height;encoder.frameRate=m.fps;
+      encoder.quantizationParameter=20;encoder.speed=3;encoder.initialize();
+      const canvas=document.createElement('canvas');canvas.width=m.width;canvas.height=m.height;
+      ctx=canvas.getContext('2d',{alpha:false,willReadFrequently:true});filename=m.name+'.mp4';
+      total=m.count;progress.max=total;send({kind:'ack'});
+    } else if(m.kind==='frame'){
+      if(m.index!==expected)throw Error('帧序不连续。');
+      await drawPNG(m.bytes);progress.value=++expected;
+      status('正在生成整表视频 · '+expected+' / '+total);send({kind:'ack'});
+    } else if(m.kind==='finish'){
+      if(expected!==total)throw Error('帧数不完整。');
+      encoder.finalize();const bytes=encoder.FS.readFile(encoder.outputFilename).slice();encoder.delete();encoder=null;
+      savedURL=URL.createObjectURL(new Blob([bytes],{type:'video/mp4'}));
+      download.href=savedURL;download.download=filename;status('正在更新 Figma 视频…');send({kind:'encoded',bytes});
+    } else if(m.kind==='download'){
+      status(m.message);progress.hidden=true;download.hidden=false;
+    }
+  } catch(e){if(encoder){encoder.delete();encoder=null;}send({kind:'error',message:e.message || String(e)});}
+};
+window.addEventListener('unload',()=>{if(savedURL)URL.revokeObjectURL(savedURL);});
+send({kind:'ready'});
+</script></html>
